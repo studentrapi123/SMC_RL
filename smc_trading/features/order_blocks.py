@@ -596,6 +596,9 @@ def add_order_block_features(df: pd.DataFrame, bos_events: Dict[str, List],
     bull_order_blocks = []
     bear_order_blocks = []
 
+    df['bullish_ob_present'] = 0
+    df['bearish_ob_present'] = 0
+
     # Find order blocks from BOS events
     for swing_idx, break_idx in bos_events['bullish']:
         ob_idx = find_order_block_for_bullish_bos(df, swing_idx, break_idx)
@@ -641,6 +644,8 @@ def add_order_block_features(df: pd.DataFrame, bos_events: Dict[str, List],
                 ob_size = ob_high - ob_low
                 ob_body_size = abs(df['close'].iloc[i] - df['open'].iloc[i])
 
+                df.loc[i, 'bullish_ob_present'] = 1
+
                 # Get ATR value for this bar
                 atr_value = None
                 if atr is not None:
@@ -684,6 +689,8 @@ def add_order_block_features(df: pd.DataFrame, bos_events: Dict[str, List],
                 ob_low = df['low'].iloc[i]
                 ob_size = ob_high - ob_low
                 ob_body_size = abs(df['close'].iloc[i] - df['open'].iloc[i])
+
+                df.loc[i, 'bearish_ob_present'] = 1
 
                 # Get ATR value for this bar
                 atr_value = None
