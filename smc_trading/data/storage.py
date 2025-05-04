@@ -91,24 +91,6 @@ def save_features(df, symbol, timeframe, base_dir="data/processed"):
             # This converts any -999 back to NaN as well
             df_save[col] = pd.to_numeric(df_save[col], errors='coerce')
 
-    # Check non-NaN counts before saving
-    print(f"Before saving to parquet:")
-    print(f"Non-NaN bullish distances: {df_save['ob_bull_distance_pct'].notna().sum()}")
-    print(f"Non-NaN bearish distances: {df_save['ob_bear_distance_pct'].notna().sum()}")
-
-    # For those rows where bullish_ob_present is 1 but distance is NaN, set a real distance
-    has_ob_missing_dist = (df_save['bullish_ob_present'] == 1) & df_save['ob_bull_distance_pct'].isna()
-    if has_ob_missing_dist.any():
-        print(f"Warning: {has_ob_missing_dist.sum()} rows have bullish OB but missing distance")
-        # Set a default distance value for testing
-        df_save.loc[has_ob_missing_dist, 'ob_bull_distance_pct'] = 0.5
-
-    # Same for bearish OBs
-    has_ob_missing_dist = (df_save['bearish_ob_present'] == 1) & df_save['ob_bear_distance_pct'].isna()
-    if has_ob_missing_dist.any():
-        print(f"Warning: {has_ob_missing_dist.sum()} rows have bearish OB but missing distance")
-        # Set a default distance value for testing
-        df_save.loc[has_ob_missing_dist, 'ob_bear_distance_pct'] = -0.5
 
     # Save to Parquet with explicit pandas pickle protocol
     # This can sometimes help with NaN handling in parquet files
@@ -119,14 +101,6 @@ def save_features(df, symbol, timeframe, base_dir="data/processed"):
     print(f"feature length = {len(df)}")
 
     # Verify saved data
-    try:
-        df_verify = pd.read_parquet(file_path)
-        print(f"Verification after saving:")
-        print(f"Non-NaN bullish distances: {df_verify['ob_bull_distance_pct'].notna().sum()}")
-        print(f"Non-NaN bearish distances: {df_verify['ob_bear_distance_pct'].notna().sum()}")
-    except Exception as e:
-        print(f"Error verifying saved file: {e}")
-
     return file_path
 
 
@@ -138,23 +112,5 @@ def load_features(symbol, timeframe, base_dir="data/processed"):
         raise FileNotFoundError(f"Features file not found: {file_path}")
 
     df = pd.read_parquet(file_path)
-
-    # Check if any -999 values are present (these should be NaN)
-    float_columns = [
-        'ob_bull_distance_pct', 'ob_bear_distance_pct',
-        'ob_bull_age', 'ob_bear_age'
-    ]
-
-    for col in float_columns:
-        if col in df.columns:
-            sentinel_count = (df[col] == -999).sum()
-            if sentinel_count > 0:
-                print(f"Warning: Found {sentinel_count} values of -999 in {col}, converting to NaN")
-                df[col] = df[col].replace(-999, np.nan)
-
-    # Verify correct counts
-    print(f"After loading:")
-    print(f"Non-NaN bullish distances: {df['ob_bull_distance_pct'].notna().sum()}")
-    print(f"Non-NaN bearish distances: {df['ob_bear_distance_pct'].notna().sum()}")
 
     return df

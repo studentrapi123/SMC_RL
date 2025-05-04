@@ -6,9 +6,10 @@ import os
 
 from ..data.storage import save_features
 from .swing_points import calculate_atr_vectorized, directional_change_adaptive_optimized, mark_swing_points
-from .order_blocks import detect_bos_events_optimized, add_order_block_features
+from .order_blocks import detect_bos_events, add_order_block_features
 from .fair_value_gaps import find_fair_value_gaps_optimized, add_fair_value_gap_features
 from .structure import add_advanced_smc_features_optimized
+
 
 def extract_all_smc_features(df, atr_period=14, atr_multiplier=1.5, min_bars_between=1, confirmation_bars=1):
     """
@@ -48,12 +49,15 @@ def extract_all_smc_features(df, atr_period=14, atr_multiplier=1.5, min_bars_bet
     df = mark_swing_points(df, tops, bottoms)
 
     # Step 3: Detect Break of Structure events
-    bos_events, _ = detect_bos_events_optimized(df)
-    print(f"BOS detection completed")
+    bos_events, _ = detect_bos_events(df)
+    print(
+        f"BOS detection completed - Found {len(bos_events['bullish'])} bullish and {len(bos_events['bearish'])} bearish BOS events")
 
     # Step 4: Add enhanced order block features
     df = add_order_block_features(df, bos_events, atr)
-    print(f"Enhanced Order Block feature calculation completed")
+
+    # Now we can safely print information about order blocks
+    print(f"Active bullish OBs: {df['bull_ob_count'].iloc[-1]}, Active bearish OBs: {df['bear_ob_count'].iloc[-1]}")
 
     # Step 5: Add other SMC features (fair value gaps, etc.)
     # ... (your existing code)

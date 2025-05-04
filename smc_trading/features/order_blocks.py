@@ -1,179 +1,356 @@
-"""Enhanced Order Block detection and feature extraction"""
+"""
+Enhanced Order Block detection and feature engineering for RL-based SMC trading.
+This module provides classes and functions to detect, track, and analyze order blocks
+for Smart Money Concepts (SMC) based trading strategies.
+"""
 import numpy as np
 import pandas as pd
+from typing import List, Dict, Tuple, Optional, Union
 
 
 class OrderBlock:
-    """Class representing a single order block with all its properties and state"""
-    def __init__(self, idx, high, low, ob_type, swing_idx, break_idx, quality=0.0, clean=0, vol_ratio=0.0):
+    """
+    Class representing a single order block with all its properties and state.
+    Tracks formation, evolution, and interaction with price.
+    """
+
+    def __init__(self,
+                 idx: int,
+                 high: float,
+                 low: float,
+                 ob_type: str,
+                 swing_idx: int,
+                 break_idx: int,
+                 quality: float = 0.0,
+                 clean: int = 0,
+                 vol_ratio: float = 0.0):
+        """
+        Initialize a new order block.
+
+        Args:
+            idx: Index where this OB formed
+            high: High price of the OB
+            low: Low price of the OB
+            ob_type: "bullish" or "bearish"
+            swing_idx: Related swing point
+            break_idx: BOS break index
+            quality: Quality score [0-1]
+            clean: Whether the OB formation was clean (minimal price interaction before breakout)
+            vol_ratio: Volume relative to recent average
+        """
         # Basic properties
-        self.idx = idx                  # Index where this OB formed
-        self.high = high                # High price of the OB
-        self.low = low                  # Low price of the OB
-        self.ob_type = ob_type          # "bullish" or "bearish"
-        self.swing_idx = swing_idx      # Related swing point
-        self.break_idx = break_idx      # BOS break index
+        self.idx = idx  # Index where this OB formed
+        self.high = high  # High price of the OB
+        self.low = low  # Low price of the OB
+        self.ob_type = ob_type  # "bullish" or "bearish"
+        self.swing_idx = swing_idx  # Related swing point
+        self.break_idx = break_idx  # BOS break index
+        self.direction = 1 if ob_type == "bullish" else -1  # Numerical direction
 
         # Derived properties
         self.creation_time = idx
         self.quality = quality
         self.clean = clean
         self.vol_ratio = vol_ratio
+        self.size = high - low
 
         # State properties (updated over time)
         self.mitigated = False
         self.mitigation_idx = None
         self.retests = 0
         self.age = 0
+        self.last_retest_idx = None
 
-    def calculate_distance(self, current_price):
-        """Calculate distance from current price to order block (in percent)"""
-        if current_price > self.high:
-            return (current_price - self.high) / current_price * 100
-        elif current_price < self.low:
-            return (current_price - self.low) / current_price * 100
-        else:
-            return 0.0  # Inside the OB
+    def calculate_distance(self, current_price: float) -> float:
+        """
+        Calculate direction-aware distance from current price to order block.
+        Positive values indicate price is in the expected reaction zone.
 
-    def is_active(self, current_idx):
-        """Check if this order block is still active"""
-        if self.mitigated:
-            return False
-        return True
+        Args:
+            current_price: Current price to measure distance from
 
-    def update(self, current_idx, current_price, current_high, current_low):
-        """Update the order block state based on new price data"""
+        Returns:
+            Normalized directional distance
+        """
+        if self.ob_type == "bullish":
+            # For bullish OB: positive when price below OB (expected move up to OB)
+            if current_price < self.low:
+                return (self.low - current_price) / (self.high - self.low)
+            elif current_price > self.high:
+                return -(current_price - self.high) / (self.high - self.low)
+            else:
+                return 0.0  # Inside the OB
+        else:  # bearish
+            # For bearish OB: positive when price above OB (expected move down to OB)
+            if current_price > self.high:
+                return (current_price - self.high) / (self.high - self.low)
+            elif current_price < self.low:
+                return -(self.low - current_price) / (self.high - self.low)
+            else:
+                return 0.0  # Inside the OB
+
+    def is_active(self) -> bool:
+        """Check if this order block is still active (not mitigated)"""
+        return not self.mitigated
+
+    def update(self, current_idx: int, current_price: float, current_high: float, current_low: float) -> None:
+        """
+        Update the order block state based on new price data.
+
+        Args:
+            current_idx: Current bar index
+            current_price: Current close price
+            current_high: Current high price
+            current_low: Current low price
+        """
         # Update age
         self.age = current_idx - self.creation_time
 
-        # Check for retest (price touching the zone)
-        if (self.ob_type == "bullish" and
-            current_low <= self.high and current_high >= self.low):
-            self.retests += 1
-
-        if (self.ob_type == "bearish" and
-            current_high >= self.low and current_low <= self.high):
-            self.retests += 1
+        # Check for retest (price touching or entering the zone)
+        if self.ob_type == "bullish":
+            if current_low <= self.high and current_high >= self.low:
+                self.retests += 1
+                self.last_retest_idx = current_idx
+        else:  # bearish
+            if current_high >= self.low and current_low <= self.high:
+                self.retests += 1
+                self.last_retest_idx = current_idx
 
         # Check for mitigation
         if not self.mitigated:
-            if (self.ob_type == "bullish" and current_price <= self.high):
+            if self.ob_type == "bullish" and current_price <= self.high:
+                self.mitigated = True
+                self.mitigation_idx = current_idx
+            elif self.ob_type == "bearish" and current_price >= self.low:
                 self.mitigated = True
                 self.mitigation_idx = current_idx
 
-            if (self.ob_type == "bearish" and current_price >= self.low):
-                self.mitigated = True
-                self.mitigation_idx = current_idx
+    def to_dict(self) -> Dict:
+        """Convert order block to dictionary for easy serialization"""
+        return {
+            "direction": self.direction,
+            "distance": None,  # Will be calculated dynamically later
+            "high": self.high,
+            "low": self.low,
+            "quality": self.quality,
+            "age": self.age,
+            "retests": self.retests,
+            "clean": self.clean,
+            "vol_ratio": self.vol_ratio,
+            "size": self.size,
+            "creation_time": self.creation_time
+        }
 
 
 class OrderBlockManager:
-    """Class for managing and tracking all active order blocks"""
+    """
+    Class for managing and tracking multiple order blocks.
+    Handles detection, state updates, and feature calculation.
+    """
+
     def __init__(self):
-        self.all_blocks = []
-        self.active_bull_blocks = []
-        self.active_bear_blocks = []
+        """Initialize a new order block manager"""
+        self.all_blocks = []  # Historical record of all blocks
+        self.active_blocks = []  # Currently active blocks
 
-    def add_order_block(self, order_block):
-        """Add a new order block to tracking"""
+    def add_order_block(self, order_block: OrderBlock) -> None:
+        """
+        Add a new order block to tracking.
+
+        Args:
+            order_block: OrderBlock object to add
+        """
         self.all_blocks.append(order_block)
-        if order_block.ob_type == "bullish":
-            self.active_bull_blocks.append(order_block)
-        else:
-            self.active_bear_blocks.append(order_block)
+        self.active_blocks.append(order_block)
 
-    def update_all_blocks(self, idx, price, high, low):
-        """Update all active order blocks with new data"""
-        # Update all bullish OBs
-        for ob in self.active_bull_blocks[:]:  # Copy to avoid modification during iteration
+    def update_all_blocks(self, idx: int, price: float, high: float, low: float) -> None:
+        """
+        Update all active order blocks with new data.
+
+        Args:
+            idx: Current bar index
+            price: Current close price
+            high: Current high price
+            low: Current low price
+        """
+        # Update each block and filter out mitigated ones
+        still_active = []
+        for ob in self.active_blocks:
             ob.update(idx, price, high, low)
-            if not ob.is_active(idx):
-                self.active_bull_blocks.remove(ob)
+            if ob.is_active():
+                still_active.append(ob)
 
-        # Update all bearish OBs
-        for ob in self.active_bear_blocks[:]:  # Copy to avoid modification during iteration
-            ob.update(idx, price, high, low)
-            if not ob.is_active(idx):
-                self.active_bear_blocks.remove(ob)
+        self.active_blocks = still_active
 
-    def get_closest_bull_block(self, price):
-        """Get the bullish order block closest to current price"""
-        if not self.active_bull_blocks:
+    def get_closest_block(self, price: float, direction: Optional[int] = None) -> Optional[OrderBlock]:
+        """
+        Get the order block closest to current price, optionally filtered by direction.
+
+        Args:
+            price: Current price
+            direction: Filter by direction (1=bullish, -1=bearish, None=any)
+
+        Returns:
+            Closest OrderBlock or None if no blocks match criteria
+        """
+        if not self.active_blocks:
             return None
 
-        closest_block = min(self.active_bull_blocks,
-                           key=lambda ob: abs(ob.calculate_distance(price)))
-        return closest_block
+        filtered_blocks = self.active_blocks
+        if direction is not None:
+            filtered_blocks = [ob for ob in self.active_blocks if ob.direction == direction]
 
-    def get_closest_bear_block(self, price):
-        """Get the bearish order block closest to current price"""
-        if not self.active_bear_blocks:
+        if not filtered_blocks:
             return None
 
-        closest_block = min(self.active_bear_blocks,
-                           key=lambda ob: abs(ob.calculate_distance(price)))
-        return closest_block
+        return min(filtered_blocks, key=lambda ob: abs(ob.calculate_distance(price)))
 
-    def get_feature_summary(self, price):
-        """Create a feature summary from all active blocks"""
+    def get_blocks_by_relevance(self, price: float, atr: float = None) -> List[OrderBlock]:
+        """
+        Sort active blocks by relevance to current price.
+
+        Args:
+            price: Current price
+            atr: Current ATR value (optional)
+
+        Returns:
+            List of OrderBlocks sorted by relevance
+        """
+        if not self.active_blocks:
+            return []
+
+        # Calculate relevance scores
+        scored_blocks = []
+        for ob in self.active_blocks:
+            distance = abs(ob.calculate_distance(price))
+            # Exponential decay for distance (closer is better)
+            distance_score = np.exp(-2 * distance) if distance is not None else 0
+
+            # Age decay (newer is better)
+            age_score = np.exp(-0.01 * ob.age)
+
+            # Retest factor (more retests is better, up to a point)
+            retest_score = min(1.0, ob.retests / 3)
+
+            # Quality factor (directly use quality score)
+            quality_score = ob.quality
+
+            # Combine scores with weights
+            relevance = (0.4 * distance_score +
+                         0.3 * quality_score +
+                         0.2 * age_score +
+                         0.1 * retest_score)
+
+            scored_blocks.append((ob, relevance))
+
+        # Sort by descending relevance
+        scored_blocks.sort(key=lambda x: x[1], reverse=True)
+
+        # Return just the blocks
+        return [block for block, _ in scored_blocks]
+
+    def get_feature_arrays(self, price: float) -> Dict[str, List]:
+        """
+        Create arrays of order block features for storage in DataFrame.
+        Each array contains values for all active order blocks.
+
+        Args:
+            price: Current price for distance calculations
+
+        Returns:
+            Dictionary of feature arrays
+        """
+        if not self.active_blocks:
+            return {
+                'ob_directions': [],
+                'ob_distances': [],
+                'ob_qualities': [],
+                'ob_ages': [],
+                'ob_high_prices': [],
+                'ob_low_prices': [],
+                'ob_retests': [],
+                'ob_cleanness': [],
+                'ob_sizes': [],
+                'ob_volume_ratios': []
+            }
+
+        # Sort by relevance to ensure consistent ordering
+        sorted_blocks = self.get_blocks_by_relevance(price)
+
+        # Create feature arrays
         features = {
-            'bull_ob_count': len(self.active_bull_blocks),
-            'bear_ob_count': len(self.active_bear_blocks),
-            'bull_ob_present': 1 if self.active_bull_blocks else 0,
-            'bear_ob_present': 1 if self.active_bear_blocks else 0,
-            'bull_distance_pct': None,
-            'bear_distance_pct': None,
-            'bull_retests_avg': None,
-            'bear_retests_avg': None,
-            'bull_quality_avg': None,
-            'bear_quality_avg': None,
-            'bull_age_avg': None,
-            'bear_age_avg': None,
-            'bull_closest_quality': None,
-            'bear_closest_quality': None,
-            'bull_closest_retests': None,
-            'bear_closest_retests': None,
-            'bull_closest_clean': None,
-            'bear_closest_clean': None,
-            'bull_closest_vol_ratio': None,
-            'bear_closest_vol_ratio': None,
+            'ob_directions': [ob.direction for ob in sorted_blocks],
+            'ob_distances': [ob.calculate_distance(price) for ob in sorted_blocks],
+            'ob_qualities': [ob.quality for ob in sorted_blocks],
+            'ob_ages': [ob.age for ob in sorted_blocks],
+            'ob_high_prices': [ob.high for ob in sorted_blocks],
+            'ob_low_prices': [ob.low for ob in sorted_blocks],
+            'ob_retests': [ob.retests for ob in sorted_blocks],
+            'ob_cleanness': [ob.clean for ob in sorted_blocks],
+            'ob_sizes': [ob.size for ob in sorted_blocks],
+            'ob_volume_ratios': [ob.vol_ratio for ob in sorted_blocks]
         }
-
-        # Get closest blocks
-        closest_bull = self.get_closest_bull_block(price)
-        closest_bear = self.get_closest_bear_block(price)
-
-        # Add closest block features
-        if closest_bull:
-            features['bull_distance_pct'] = closest_bull.calculate_distance(price)
-            features['bull_closest_quality'] = closest_bull.quality
-            features['bull_closest_retests'] = closest_bull.retests
-            features['bull_closest_clean'] = closest_bull.clean
-            features['bull_closest_vol_ratio'] = closest_bull.vol_ratio
-
-        if closest_bear:
-            features['bear_distance_pct'] = closest_bear.calculate_distance(price)
-            features['bear_closest_quality'] = closest_bear.quality
-            features['bear_closest_retests'] = closest_bear.retests
-            features['bear_closest_clean'] = closest_bear.clean
-            features['bear_closest_vol_ratio'] = closest_bear.vol_ratio
-
-        # Calculate average metrics
-        if self.active_bull_blocks:
-            features['bull_retests_avg'] = sum(ob.retests for ob in self.active_bull_blocks) / len(self.active_bull_blocks)
-            features['bull_quality_avg'] = sum(ob.quality for ob in self.active_bull_blocks) / len(self.active_bull_blocks)
-            features['bull_age_avg'] = sum(ob.age for ob in self.active_bull_blocks) / len(self.active_bull_blocks)
-
-        if self.active_bear_blocks:
-            features['bear_retests_avg'] = sum(ob.retests for ob in self.active_bear_blocks) / len(self.active_bear_blocks)
-            features['bear_quality_avg'] = sum(ob.quality for ob in self.active_bear_blocks) / len(self.active_bear_blocks)
-            features['bear_age_avg'] = sum(ob.age for ob in self.active_bear_blocks) / len(self.active_bear_blocks)
 
         return features
 
+    def get_summary_stats(self, price: float) -> Dict[str, float]:
+        """
+        Calculate summary statistics about all active order blocks.
 
-def find_order_block_for_bullish_bos(df, swing_high_index, break_index):
+        Args:
+            price: Current price
+
+        Returns:
+            Dictionary of summary statistics
+        """
+        stats = {
+            'bull_ob_count': 0,
+            'bear_ob_count': 0,
+            'nearest_bull_distance': None,
+            'nearest_bear_distance': None,
+            'mean_quality': 0.0,
+            'max_quality': 0.0
+        }
+
+        if not self.active_blocks:
+            return stats
+
+        # Count by direction
+        bull_blocks = [ob for ob in self.active_blocks if ob.direction == 1]
+        bear_blocks = [ob for ob in self.active_blocks if ob.direction == -1]
+
+        stats['bull_ob_count'] = len(bull_blocks)
+        stats['bear_ob_count'] = len(bear_blocks)
+
+        # Nearest distances
+        if bull_blocks:
+            closest_bull = min(bull_blocks, key=lambda ob: abs(ob.calculate_distance(price)))
+            stats['nearest_bull_distance'] = closest_bull.calculate_distance(price)
+
+        if bear_blocks:
+            closest_bear = min(bear_blocks, key=lambda ob: abs(ob.calculate_distance(price)))
+            stats['nearest_bear_distance'] = closest_bear.calculate_distance(price)
+
+        # Quality metrics
+        if self.active_blocks:
+            qualities = [ob.quality for ob in self.active_blocks]
+            stats['mean_quality'] = sum(qualities) / len(qualities)
+            stats['max_quality'] = max(qualities)
+
+        return stats
+
+
+def find_order_block_for_bullish_bos(df: pd.DataFrame, swing_high_index: int, break_index: int) -> int:
     """
-    Find the order block for a bullish BOS (the last bearish candle in the range)
+    Find the order block for a bullish BOS (the last bearish candle in the range).
+
+    Args:
+        df: DataFrame with price data
+        swing_high_index: Index of the swing high
+        break_index: Index of the breakout bar
+
+    Returns:
+        Index of the order block or -1 if none found
     """
     # Loop backward from the break index to the swing high index
     for i in range(break_index - 1, swing_high_index, -1):
@@ -184,9 +361,17 @@ def find_order_block_for_bullish_bos(df, swing_high_index, break_index):
     return -1  # No suitable candle found
 
 
-def find_order_block_for_bearish_bos(df, swing_low_index, break_index):
+def find_order_block_for_bearish_bos(df: pd.DataFrame, swing_low_index: int, break_index: int) -> int:
     """
-    Find the order block for a bearish BOS (the last bullish candle in the range)
+    Find the order block for a bearish BOS (the last bullish candle in the range).
+
+    Args:
+        df: DataFrame with price data
+        swing_low_index: Index of the swing low
+        break_index: Index of the breakout bar
+
+    Returns:
+        Index of the order block or -1 if none found
     """
     # Loop backward from the break index to the swing low index
     for i in range(break_index - 1, swing_low_index, -1):
@@ -197,7 +382,42 @@ def find_order_block_for_bearish_bos(df, swing_low_index, break_index):
     return -1  # No suitable candle found
 
 
-def calculate_ob_quality(df, i, ob_size, ob_body_size, atr_value=None):
+def is_clean_ob(df: pd.DataFrame, ob_idx: int, break_idx: int, is_bullish: bool = True) -> int:
+    """
+    Check if an order block is "clean" - had minimal price interaction before breakout.
+
+    Args:
+        df: DataFrame with price data
+        ob_idx: Index of the order block
+        break_idx: Index of the breakout bar
+        is_bullish: True for bullish OB, False for bearish OB
+
+    Returns:
+        1 if clean, 0 if not
+    """
+    if ob_idx >= break_idx or break_idx >= len(df):
+        return 0
+
+    ob_high = df['high'].iloc[ob_idx]
+    ob_low = df['low'].iloc[ob_idx]
+
+    # Get prices between OB and breakout
+    prices_between = df.iloc[ob_idx + 1:break_idx]
+
+    if is_bullish:
+        # For bullish OB, price should stay below the OB zone before breakout
+        if len(prices_between) > 0 and (prices_between['close'] < ob_low).all():
+            return 1
+    else:
+        # For bearish OB, price should stay above the OB zone before breakout
+        if len(prices_between) > 0 and (prices_between['close'] > ob_high).all():
+            return 1
+
+    return 0
+
+
+def calculate_ob_quality(df: pd.DataFrame, i: int, ob_size: float, ob_body_size: float,
+                         atr_value: Optional[float] = None) -> float:
     """
     Calculate a quality score (0-1) for an order block based on multiple metrics.
 
@@ -209,7 +429,7 @@ def calculate_ob_quality(df, i, ob_size, ob_body_size, atr_value=None):
         atr_value: ATR value at this bar (if available)
 
     Returns:
-        float: Quality score between 0 and 1
+        Quality score between 0 and 1
     """
     # 1. Candle size relative to recent candles (10-bar lookback)
     recent_range = df['high'].iloc[max(0, i - 10):i + 1].max() - df['low'].iloc[max(0, i - 10):i + 1].min()
@@ -238,42 +458,16 @@ def calculate_ob_quality(df, i, ob_size, ob_body_size, atr_value=None):
     return quality
 
 
-def is_clean_ob(df, ob_idx, break_idx, is_bullish=True):
+def detect_bos_events(df: pd.DataFrame) -> Tuple[Dict[str, List], Dict[str, List]]:
     """
-    Check if an order block is "clean" - had minimal price interaction before breakout.
+    Detect Break of Structure (BOS) events and order blocks.
 
     Args:
-        df: DataFrame with price data
-        ob_idx: Index of the order block
-        break_idx: Index of the breakout bar
-        is_bullish: True for bullish OB, False for bearish OB
+        df: DataFrame with price data containing 'is_swing_high' and 'is_swing_low' columns
 
     Returns:
-        int: 1 if clean, 0 if not
+        Tuple of (bos_events, order_blocks) dictionaries
     """
-    if ob_idx >= break_idx or break_idx >= len(df):
-        return 0
-
-    ob_high = df['high'].iloc[ob_idx]
-    ob_low = df['low'].iloc[ob_idx]
-
-    # Get prices between OB and breakout
-    prices_between = df.iloc[ob_idx + 1:break_idx]
-
-    if is_bullish:
-        # For bullish OB, price should stay below the OB zone before breakout
-        if len(prices_between) > 0 and (prices_between['close'] < ob_low).all():
-            return 1
-    else:
-        # For bearish OB, price should stay above the OB zone before breakout
-        if len(prices_between) > 0 and (prices_between['close'] > ob_high).all():
-            return 1
-
-    return 0
-
-
-def detect_bos_events_optimized(df):
-    """Optimized detection of Break of Structure (BOS) events and order blocks"""
     # Pre-extract numpy arrays for faster access
     high = df['high'].values
     low = df['low'].values
@@ -290,7 +484,7 @@ def detect_bos_events_optimized(df):
     bos_events = {'bullish': [], 'bearish': []}
     order_blocks = {'bullish': [], 'bearish': []}
 
-    # Process bullish BOS events (more efficiently)
+    # Process bullish BOS events
     for i in swing_high_indices:
         swing_high_val = high[i]
 
@@ -323,7 +517,7 @@ def detect_bos_events_optimized(df):
 
                 break
 
-    # Process bearish BOS events (more efficiently)
+    # Process bearish BOS events
     for i in swing_low_indices:
         swing_low_val = low[i]
 
@@ -359,11 +553,10 @@ def detect_bos_events_optimized(df):
     return bos_events, order_blocks
 
 
-def add_order_block_features(df, bos_events, atr=None):
+def add_order_block_features(df: pd.DataFrame, bos_events: Dict[str, List],
+                             atr: Optional[np.ndarray] = None) -> pd.DataFrame:
     """
-    Enhanced function to add order block features to the dataframe.
-
-    This version properly tracks all active order blocks at each time.
+    Add order block features to the dataframe using array-based approach.
 
     Args:
         df: DataFrame with price data
@@ -371,7 +564,7 @@ def add_order_block_features(df, bos_events, atr=None):
         atr: ATR array (if available)
 
     Returns:
-        DataFrame: Updated dataframe with order block features
+        DataFrame with added order block features
     """
     df = df.copy()
 
@@ -393,26 +586,28 @@ def add_order_block_features(df, bos_events, atr=None):
         if ob_idx != -1:
             bear_order_blocks.append((ob_idx, swing_idx, break_idx))
 
-    # Initialize feature columns
-    feature_columns = [
-        'bullish_ob_present', 'bearish_ob_present',
-        'bull_ob_count', 'bear_ob_count',
-        'ob_bull_distance_pct', 'ob_bear_distance_pct',
-        'ob_bull_retests', 'ob_bear_retests',
-        'ob_bull_volatility_ratio', 'ob_bear_volatility_ratio',
-        'ob_bull_quality', 'ob_bear_quality',
-        'ob_bull_clean', 'ob_bear_clean',
-        'ob_bull_age', 'ob_bear_age',
-        'ob_bull_avg_quality', 'ob_bear_avg_quality'
+    # Initialize array columns
+    array_columns = [
+        'ob_directions', 'ob_distances', 'ob_qualities',
+        'ob_ages', 'ob_high_prices', 'ob_low_prices', 'ob_retests',
+        'ob_cleanness', 'ob_sizes', 'ob_volume_ratios'
     ]
 
-    # Initialize columns with appropriate NaN or 0 values
-    for col in feature_columns:
-        if col in ['ob_bull_distance_pct', 'ob_bear_distance_pct', 'ob_bull_age', 'ob_bear_age',
-                  'ob_bull_avg_quality', 'ob_bear_avg_quality', 'ob_bull_volatility_ratio', 'ob_bear_volatility_ratio']:
-            df[col] = float('nan')
-        else:
+    for col in array_columns:
+        df[col] = [[] for _ in range(len(df))]
+
+    # Initialize summary columns
+    summary_columns = [
+        'bull_ob_count', 'bear_ob_count',
+        'nearest_bull_distance', 'nearest_bear_distance',
+        'mean_quality', 'max_quality'
+    ]
+
+    for col in summary_columns:
+        if col.endswith('_count'):
             df[col] = 0
+        else:
+            df[col] = float('nan')
 
     # Process each bar and update features
     for i in range(len(df)):
@@ -512,44 +707,21 @@ def add_order_block_features(df, bos_events, atr=None):
             low=df['low'].iloc[i]
         )
 
-        # Get feature summary and update dataframe
-        features = ob_manager.get_feature_summary(df['close'].iloc[i])
+        # Get feature arrays and update dataframe
+        feature_arrays = ob_manager.get_feature_arrays(df['close'].iloc[i])
+        for col, values in feature_arrays.items():
+            df.at[i, col] = values
 
-        # Update dataframe columns
-        df.loc[i, 'bullish_ob_present'] = features['bull_ob_present']
-        df.loc[i, 'bearish_ob_present'] = features['bear_ob_present']
-        df.loc[i, 'bull_ob_count'] = features['bull_ob_count']
-        df.loc[i, 'bear_ob_count'] = features['bear_ob_count']
+        # Get summary stats and update dataframe
+        summary_stats = ob_manager.get_summary_stats(df['close'].iloc[i])
+        for col, value in summary_stats.items():
+            df.at[i, col] = value
 
-        # Update distance features (closest block)
-        if features['bull_distance_pct'] is not None:
-            df.loc[i, 'ob_bull_distance_pct'] = features['bull_distance_pct']
-            df.loc[i, 'ob_bull_retests'] = features['bull_closest_retests']
-            df.loc[i, 'ob_bull_quality'] = features['bull_closest_quality']
-            df.loc[i, 'ob_bull_clean'] = features['bull_closest_clean']
-            df.loc[i, 'ob_bull_volatility_ratio'] = features['bull_closest_vol_ratio']
-
-        if features['bear_distance_pct'] is not None:
-            df.loc[i, 'ob_bear_distance_pct'] = features['bear_distance_pct']
-            df.loc[i, 'ob_bear_retests'] = features['bear_closest_retests']
-            df.loc[i, 'ob_bear_quality'] = features['bear_closest_quality']
-            df.loc[i, 'ob_bear_clean'] = features['bear_closest_clean']
-            df.loc[i, 'ob_bear_volatility_ratio'] = features['bear_closest_vol_ratio']
-
-        # Update average metrics
-        if features['bull_quality_avg'] is not None:
-            df.loc[i, 'ob_bull_avg_quality'] = features['bull_quality_avg']
-            df.loc[i, 'ob_bull_age'] = features['bull_age_avg']
-
-        if features['bear_quality_avg'] is not None:
-            df.loc[i, 'ob_bear_avg_quality'] = features['bear_quality_avg']
-            df.loc[i, 'ob_bear_age'] = features['bear_age_avg']
-
-    # Add trend context (similar to original code)
+    # Add trend context
     if 'trend' not in df.columns and len(df) >= 50:
         df['ma50'] = df['close'].rolling(50).mean()
         df['trend'] = np.where(df['close'] > df['ma50'], 1, -1)
-        df['ob_bull_with_trend'] = df['bullish_ob_present'] * (df['trend'] == 1)
-        df['ob_bear_with_trend'] = df['bearish_ob_present'] * (df['trend'] == -1)
+        df['ob_bull_with_trend'] = (df['bull_ob_count'] > 0) & (df['trend'] == 1)
+        df['ob_bear_with_trend'] = (df['bear_ob_count'] > 0) & (df['trend'] == -1)
 
     return df
