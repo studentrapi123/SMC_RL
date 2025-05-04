@@ -10,10 +10,9 @@ from .order_blocks import detect_bos_events_optimized, add_order_block_features
 from .fair_value_gaps import find_fair_value_gaps_optimized, add_fair_value_gap_features
 from .structure import add_advanced_smc_features_optimized
 
-
 def extract_all_smc_features(df, atr_period=14, atr_multiplier=1.5, min_bars_between=1, confirmation_bars=1):
     """
-    Extract all SMC features from price data
+    Extract all SMC features from price data with the improved order block tracking
 
     Args:
         df: DataFrame with OHLC price data
@@ -34,7 +33,7 @@ def extract_all_smc_features(df, atr_period=14, atr_multiplier=1.5, min_bars_bet
     low = df['low'].values
 
     # Step 1: Calculate ATR and detect swing points
-    start_time = time.time()
+    from .swing_points import directional_change_adaptive_optimized, mark_swing_points
     tops, bottoms, atr = directional_change_adaptive_optimized(
         close, high, low,
         atr_period=atr_period,
@@ -43,27 +42,24 @@ def extract_all_smc_features(df, atr_period=14, atr_multiplier=1.5, min_bars_bet
         confirmation_bars=confirmation_bars
     )
     df['atr'] = atr
-    print(f"Swing point detection completed in {time.time() - start_time:.2f} seconds")
+    print(f"Swing point detection completed")
 
     # Step 2: Mark swing points in dataframe
     df = mark_swing_points(df, tops, bottoms)
 
-    # Step 3: Detect Break of Structure events and order blocks
-    start_time = time.time()
-    bos_events, order_blocks = detect_bos_events_optimized(df)
-    print(f"BOS and Order Block detection completed in {time.time() - start_time:.2f} seconds")
+    # Step 3: Detect Break of Structure events
+    bos_events, _ = detect_bos_events_optimized(df)
+    print(f"BOS detection completed")
 
-    # Step 4: Detect Fair Value Gaps
-    start_time = time.time()
-    fvg_events = find_fair_value_gaps_optimized(df)
-    print(f"Fair Value Gap detection completed in {time.time() - start_time:.2f} seconds")
+    # Step 4: Add enhanced order block features
+    df = add_order_block_features(df, bos_events, atr)
+    print(f"Enhanced Order Block feature calculation completed")
 
-    # Step 5: Add all feature sets
-    start_time = time.time()
-    df = add_order_block_features(df, order_blocks, atr)
+    # Step 5: Add other SMC features (fair value gaps, etc.)
+    # ... (your existing code)
     '''df = add_fair_value_gap_features(df, fvg_events, atr)
-    df = add_advanced_smc_features_optimized(df, tops, bottoms, bos_events, order_blocks, fvg_events, atr)
-    print(f"Feature calculation completed in {time.time() - start_time:.2f} seconds")'''
+        df = add_advanced_smc_features_optimized(df, tops, bottoms, bos_events, order_blocks, fvg_events, atr)
+        print(f"Feature calculation completed in {time.time() - start_time:.2f} seconds")'''
 
     # Return processed dataframe
     return df
