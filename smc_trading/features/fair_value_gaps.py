@@ -48,7 +48,6 @@ def find_fair_value_gaps_optimized(df):
     for i in range(2, len(df)):
         if high[i] < low[i - 2]:
             # Gap detected
-            # Gap detected
             start_idx = i - 2
             end_idx = i
             top_price = low[i - 2]
@@ -74,7 +73,7 @@ def find_fair_value_gaps_optimized(df):
 
             fvg_events['bearish'].append((start_idx, end_idx, top_price, bottom_price, mitigated, mitigation_idx))
 
-        return fvg_events
+    return fvg_events  # This line should be de-indented to align with the function definition
 
 def add_fair_value_gap_features(df, fvg_events, atr=None):
     """Add fair value gap features to the dataframe without lookahead bias"""
