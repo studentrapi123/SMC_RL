@@ -1,12 +1,11 @@
 """Complete SMC feature extraction pipeline"""
 import pandas as pd
-import numpy as np
 import time
 import os
 
-from ..data.storage import save_features
+from ..data.storage import save_features, load_price_data
 from .swing_points import calculate_atr_vectorized, directional_change_adaptive_optimized, mark_swing_points
-from .order_blocks import detect_bos_events, add_order_block_features
+from .order_blocks import detect_bos_events_optimized, add_order_block_features
 from .fair_value_gaps import find_fair_value_gaps_optimized, add_fair_value_gap_features
 from .structure import add_advanced_smc_features_optimized
 
@@ -49,9 +48,8 @@ def extract_all_smc_features(df, atr_period=14, atr_multiplier=1.5, min_bars_bet
     df = mark_swing_points(df, tops, bottoms)
 
     # Step 3: Detect Break of Structure events
-    bos_events, _ = detect_bos_events(df)
-    print(
-        f"BOS detection completed - Found {len(bos_events['bullish'])} bullish and {len(bos_events['bearish'])} bearish BOS events")
+    bos_events, _ = detect_bos_events_optimized(df)
+    print(f"BOS detection completed - Found {len(bos_events['bullish'])} bullish and {len(bos_events['bearish'])} bearish BOS events")
 
     # Step 4: Add enhanced order block features
     df = add_order_block_features(df, bos_events, atr)
@@ -77,12 +75,12 @@ def process_symbol_timeframe(symbol, timeframe, base_dir="data"):
     processed_dir = os.path.join(base_dir, "processed")
 
     # Define paths
-    features_path = os.path.join(processed_dir, symbol, f"{symbol}_{timeframe}_features.parquet")
+    features_path = os.path.join(processed_dir, symbol, f"{symbol}_{timeframe}_features.csv")
 
     # Check if features already exist
     if os.path.exists(features_path):
         # Check if raw data is newer than features
-        raw_path = os.path.join(raw_data_dir, symbol, f"{symbol}_{timeframe}.parquet")
+        raw_path = os.path.join(raw_data_dir, symbol, f"{symbol}_{timeframe}.csv")
         if os.path.exists(raw_path) and os.path.getmtime(raw_path) <= os.path.getmtime(features_path):
             print(f"Using existing features for {symbol} {timeframe}")
             return True

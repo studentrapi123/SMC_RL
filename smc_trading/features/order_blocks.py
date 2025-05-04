@@ -8,6 +8,27 @@ import pandas as pd
 from typing import List, Dict, Tuple, Optional, Union
 
 
+def prepare_features_for_storage(df):
+    """
+    Prepare array features for CSV storage
+
+    Args:
+        df: DataFrame with order block array features
+
+    Returns:
+        DataFrame with list columns converted to strings for storage
+    """
+    df_out = df.copy()
+
+    # Find all list columns
+    list_columns = [col for col in df.columns if isinstance(df.iloc[0].get(col, None), list)]
+
+    # Convert lists to their string representation
+    for col in list_columns:
+        df_out[col] = df_out[col].apply(str)
+
+    return df_out
+
 class OrderBlock:
     """
     Class representing a single order block with all its properties and state.
