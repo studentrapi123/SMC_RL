@@ -6,6 +6,9 @@ import sys
 from pathlib import Path
 import MetaTrader5 as mt5
 from datetime import datetime, timedelta
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.metrics import confusion_matrix
 
 # Add the project root to the path to enable imports
 sys.path.append(str(Path(__file__).parent.parent))
@@ -18,14 +21,15 @@ from smc_trading.features.structure import add_advanced_smc_features_optimized
 from smc_trading.features.feature_set import extract_all_smc_features
 from smc_trading.data.processing import clean_price_data, add_basic_indicators
 from smc_trading.data.collection import get_historical_data
+from smc_trading.visualization.charting import plot_combined_analysis
 
 
-class TestBase(unittest.TestCase):
-    """Base class for all tests to share MT5 initialization"""
+class TestFeatureQuality(unittest.TestCase):
+    """Test the quality and correctness of the features"""
 
     @classmethod
     def setUpClass(cls):
-        """Initialize MT5 and download test data once for all tests"""
+        """Download and prepare test data"""
         # Initialize MT5
         if not mt5.initialize():
             print(f"Failed to initialize MT5: {mt5.last_error()}")
@@ -33,345 +37,431 @@ class TestBase(unittest.TestCase):
 
         print("MT5 initialized successfully")
 
-        # Define test data parameters
-        cls.symbol = "EURUSD"
-        cls.timeframe = mt5.TIMEFRAME_H1
+        # Download 3 months of data for more robust testing
+        cls.symbols = ["EURUSD", "GBPUSD", "USDJPY"]
+        cls.timeframes = [mt5.TIMEFRAME_H1, mt5.TIMEFRAME_H4]
+        timeframe_names = {mt5.TIMEFRAME_H1: "H1", mt5.TIMEFRAME_H4: "H4"}
+
         end_date = datetime.now()
-        start_date = end_date - timedelta(days=30)  # 30 days of data
+        start_date = end_date - timedelta(days=90)  # 90 days of data
 
-        # Download test data
-        cls.df = get_historical_data(cls.symbol, start_date, end_date, cls.timeframe, mt5)
+        cls.data = {}
+        cls.feature_data = {}
 
-        if cls.df is None or len(cls.df) == 0:
-            raise ValueError(f"Failed to download test data for {cls.symbol}")
+        for symbol in cls.symbols:
+            cls.data[symbol] = {}
+            cls.feature_data[symbol] = {}
 
-        print(f"Downloaded {len(cls.df)} bars of {cls.symbol} data")
+            for tf in cls.timeframes:
+                print(f"Downloading {symbol} {timeframe_names[tf]} data...")
+                df = get_historical_data(symbol, start_date, end_date, tf, mt5)
 
-        # Clean the data
-        cls.df = clean_price_data(cls.df)
+                if df is not None and len(df) > 0:
+                    # Clean and prepare data
+                    df = clean_price_data(df)
 
-        # Add 'atr' column to the dataframe
-        high = cls.df['high'].values
-        low = cls.df['low'].values
-        close = cls.df['close'].values
-        cls.atr = calculate_atr_vectorized(high, low, close, period=14)
-        cls.df['atr'] = cls.atr
+                    # Store raw data
+                    cls.data[symbol][tf] = df
+
+                    # Extract features
+                    print(f"Extracting features for {symbol} {timeframe_names[tf]}...")
+                    df_features = extract_all_smc_features(df)
+
+                    # Store feature data
+                    cls.feature_data[symbol][tf] = df_features
+                else:
+                    print(f"Failed to download {symbol} {timeframe_names[tf]} data")
+
+        # Create output directory for visualizations
+        cls.output_dir = Path(__file__).parent / "test_output"
+        cls.output_dir.mkdir(exist_ok=True)
 
     @classmethod
     def tearDownClass(cls):
-        """Shutdown MT5 after tests are complete"""
+        """Shutdown MT5 after tests"""
         mt5.shutdown()
         print("MT5 shutdown complete")
 
-
-class TestSwingPoints(TestBase):
-    """Test swing point detection functionality"""
-
-    def test_calculate_atr_vectorized(self):
-        """Test ATR calculation function"""
-        high = self.df['high'].values
-        low = self.df['low'].values
-        close = self.df['close'].values
-
-        atr = calculate_atr_vectorized(high, low, close, period=14)
-
-        # Check if ATR has correct length
-        self.assertEqual(len(atr), len(close))
-
-        # Check if ATR values are positive
-        self.assertTrue(np.all(atr > 0))
-
-        # Expect ATR to be roughly in the expected range
-        avg_range = np.mean(high - low)
-        self.assertTrue(0.5 * avg_range <= np.mean(atr) <= 2 * avg_range)
-
-    def test_directional_change_adaptive_optimized(self):
-        """Test swing point detection function"""
-        high = self.df['high'].values
-        low = self.df['low'].values
-        close = self.df['close'].values
-
-        tops, bottoms, atr = directional_change_adaptive_optimized(
-            close, high, low,
-            atr_period=14,
-            atr_multiplier=1.5,
-            min_bars_between=1,
-            confirmation_bars=1
-        )
-
-        # Check if function returns non-empty lists
-        self.assertTrue(len(tops) > 0, "No swing tops detected")
-        self.assertTrue(len(bottoms) > 0, "No swing bottoms detected")
-
-        # Check that swing points are within range
-        for _, idx, price in tops:
-            self.assertLess(idx, len(self.df), "Swing high index out of range")
-            self.assertGreaterEqual(price, self.df['close'].min(), "Swing high price too low")
-            self.assertLessEqual(price, self.df['high'].max(), "Swing high price too high")
-
-        for _, idx, price in bottoms:
-            self.assertLess(idx, len(self.df), "Swing low index out of range")
-            self.assertGreaterEqual(price, self.df['low'].min(), "Swing low price too low")
-            self.assertLessEqual(price, self.df['close'].max(), "Swing low price too high")
-
-    def test_mark_swing_points(self):
-        """Test marking swing points in DataFrame"""
-        high = self.df['high'].values
-        low = self.df['low'].values
-        close = self.df['close'].values
-
-        tops, bottoms, _ = directional_change_adaptive_optimized(
-            close, high, low,
-            atr_period=14,
-            atr_multiplier=1.5
-        )
-
-        df_marked = mark_swing_points(self.df, tops, bottoms)
-
-        # Check if swing point columns were added
-        self.assertIn('is_swing_high', df_marked.columns)
-        self.assertIn('is_swing_low', df_marked.columns)
-
-        # Verify correct number of swing points
-        self.assertEqual(df_marked['is_swing_high'].sum(), len(tops))
-        self.assertEqual(df_marked['is_swing_low'].sum(), len(bottoms))
-
-
-class TestOrderBlocks(TestBase):
-    """Test order block detection functionality"""
-
-    def setUp(self):
-        """Set up test data with marked swing points"""
-        # Get swing points
-        high = self.df['high'].values
-        low = self.df['low'].values
-        close = self.df['close'].values
-
-        tops, bottoms, _ = directional_change_adaptive_optimized(
-            close, high, low,
-            atr_period=14,
-            atr_multiplier=1.5
-        )
-
-        # Mark swing points
-        self.df_with_swing_points = mark_swing_points(self.df.copy(), tops, bottoms)
-
-    def test_detect_bos_events_optimized(self):
-        """Test BOS event detection"""
-        bos_events, order_blocks = detect_bos_events_optimized(self.df_with_swing_points)
-
-        # Check if function returns non-empty results
-        self.assertIn('bullish', bos_events)
-        self.assertIn('bearish', bos_events)
-        self.assertIn('bullish', order_blocks)
-        self.assertIn('bearish', order_blocks)
-
-        # Print some debugging info
-        print(f"Detected {len(bos_events['bullish'])} bullish BOS events")
-        print(f"Detected {len(bos_events['bearish'])} bearish BOS events")
-        print(f"Detected {len(order_blocks['bullish'])} bullish order blocks")
-        print(f"Detected {len(order_blocks['bearish'])} bearish order blocks")
-
-        # With real market data, we should typically find some BOS events
-        total_bos = len(bos_events['bullish']) + len(bos_events['bearish'])
-        self.assertGreater(total_bos, 0, "No BOS events detected")
-
-    def test_add_order_block_features(self):
-        """Test adding order block features to DataFrame"""
-        bos_events, order_blocks = detect_bos_events_optimized(self.df_with_swing_points)
-
-        # Make sure atr is in the dataframe to avoid the KeyError
-        df_test = self.df_with_swing_points.copy()
-
-        df_with_features = add_order_block_features(df_test, order_blocks, self.atr)
-
-        # Check if order block features were added
-        self.assertIn('bullish_ob_present', df_with_features.columns)
-        self.assertIn('bearish_ob_present', df_with_features.columns)
-        self.assertIn('ob_bull_distance_pct', df_with_features.columns)
-        self.assertIn('ob_bear_distance_pct', df_with_features.columns)
-
-        # Verify that the values make sense
-        self.assertGreaterEqual(df_with_features['bullish_ob_present'].sum(), 0)
-        self.assertGreaterEqual(df_with_features['bearish_ob_present'].sum(), 0)
-
-
-class TestFairValueGaps(TestBase):
-    """Test fair value gap detection functionality"""
-
-    def test_find_fair_value_gaps_optimized(self):
-        """Test FVG detection"""
-        # We need to modify this test since we can't guarantee FVGs in real data
-        # First, let's check if the function runs without error
-        fvg_events = find_fair_value_gaps_optimized(self.df)
-
-        # Check if function returns expected structure
-        self.assertIn('bullish', fvg_events)
-        self.assertIn('bearish', fvg_events)
-
-        # Print counts for debugging
-        print(f"Detected {len(fvg_events['bullish'])} bullish FVGs")
-        print(f"Detected {len(fvg_events['bearish'])} bearish FVGs")
-
-        # Check structure of FVG events if any are found
-        if fvg_events['bullish']:
-            fvg = fvg_events['bullish'][0]
-            self.assertEqual(len(fvg), 6, "FVG event should have 6 elements")
-            self.assertIsInstance(fvg[0], (int, np.integer), "Start index should be an integer")
-            self.assertIsInstance(fvg[2], (float, np.float64), "Top price should be a float")
-            self.assertIsInstance(fvg[4], bool, "Mitigated flag should be a boolean")
-
-    def test_add_fair_value_gap_features(self):
-        """Test adding FVG features to DataFrame"""
-        fvg_events = find_fair_value_gaps_optimized(self.df)
-
-        df_with_features = add_fair_value_gap_features(self.df.copy(), fvg_events, self.atr)
-
-        # Check if FVG features were added
-        self.assertIn('fvg_bull_present', df_with_features.columns)
-        self.assertIn('fvg_bear_present', df_with_features.columns)
-        self.assertIn('fvg_bull_distance_pct', df_with_features.columns)
-        self.assertIn('fvg_bear_distance_pct', df_with_features.columns)
-
-        # Instead of checking specific values, check that columns have expected types
-        self.assertTrue(df_with_features['fvg_bull_present'].dtype in (np.int64, int))
-        self.assertTrue(df_with_features['fvg_bear_present'].dtype in (np.int64, int))
-
-        # For real data, we can't assert specific cells have specific values
-        # Instead, check that the sum of presence indicators matches the count of FVGs
-        # Note: This will only match exactly if all FVGs are distinct and don't overlap
-        # So we'll check that it's at least as many as we found
-        bull_fvg_count = len(fvg_events['bullish'])
-        bear_fvg_count = len(fvg_events['bearish'])
-
-        # Print for debugging
-        print(f"Bullish FVG count: {bull_fvg_count}, Column sum: {df_with_features['fvg_bull_present'].sum()}")
-        print(f"Bearish FVG count: {bear_fvg_count}, Column sum: {df_with_features['fvg_bear_present'].sum()}")
-
-
-class TestStructureFeatures(TestBase):
-    """Test advanced structure features"""
-
-    def setUp(self):
-        """Set up test data with all previous features"""
-        # Calculate everything we need
-        high = self.df['high'].values
-        low = self.df['low'].values
-        close = self.df['close'].values
-
-        tops, bottoms, _ = directional_change_adaptive_optimized(
-            close, high, low,
-            atr_period=14,
-            atr_multiplier=1.5
-        )
-
-        self.df_prepared = mark_swing_points(self.df.copy(), tops, bottoms)
-        self.bos_events, self.order_blocks = detect_bos_events_optimized(self.df_prepared)
-        self.fvg_events = find_fair_value_gaps_optimized(self.df_prepared)
-
-        # Add basic OB and FVG features
-        self.df_prepared = add_order_block_features(self.df_prepared, self.order_blocks, self.atr)
-        self.df_prepared = add_fair_value_gap_features(self.df_prepared, self.fvg_events, self.atr)
-
-        self.tops = tops
-        self.bottoms = bottoms
-
-    def test_add_advanced_smc_features_optimized(self):
-        """Test adding advanced structure features"""
-        df_advanced = add_advanced_smc_features_optimized(
-            self.df_prepared,
-            self.tops,
-            self.bottoms,
-            self.bos_events,
-            self.order_blocks,
-            self.fvg_events,
-            self.atr
-        )
-
-        # Check if structure features were added
-        expected_columns = [
-            'structure_trend',
-            'swing_high_distance',
-            'swing_low_distance',
-            'bos_confirmation',
-            'ob_fvg_confluence',
-            'liquidity_zone',
-            'pattern_freshness',
-            'recent_volatility'
-        ]
-
-        for col in expected_columns:
-            self.assertIn(col, df_advanced.columns)
-
-        # Verify that the values fall in expected ranges
-        # structure_trend should only be -1, 0, or 1, but need to ignore NaN values
-        mask = ~df_advanced['structure_trend'].isna()
-        self.assertTrue(df_advanced.loc[mask, 'structure_trend'].isin([-1, 0, 1]).all())
-
-        # Check that pattern freshness is between 0 and 1 where not NaN
-        mask = ~df_advanced['pattern_freshness'].isna()
-        if not mask.empty and mask.any():
-            self.assertTrue((df_advanced.loc[mask, 'pattern_freshness'] >= 0).all())
-            self.assertTrue((df_advanced.loc[mask, 'pattern_freshness'] <= 1).all())
-
-
-class TestFullFeatureExtraction(TestBase):
-    """Test the complete feature extraction pipeline"""
-
-    def test_extract_all_smc_features(self):
-        """Test the complete feature extraction pipeline"""
-        df_features = extract_all_smc_features(
-            self.df.copy(),
-            atr_period=14,
-            atr_multiplier=1.5,
-            min_bars_between=1,
-            confirmation_bars=1
-        )
-
-        # Check for essential feature categories
-        swing_features = ['is_swing_high', 'is_swing_low']
-        ob_features = ['bullish_ob_present', 'bearish_ob_present', 'ob_bull_distance_pct', 'ob_bear_distance_pct']
-        fvg_features = ['fvg_bull_present', 'fvg_bear_present', 'fvg_bull_distance_pct', 'fvg_bear_distance_pct']
-        structure_features = ['structure_trend', 'bos_confirmation', 'ob_fvg_confluence']
-
-        all_expected_features = swing_features + ob_features + fvg_features + structure_features
-
-        for feature in all_expected_features:
-            self.assertIn(feature, df_features.columns)
-
-        # Ensure no NaN values in essential columns
-        for feature in ['is_swing_high', 'is_swing_low', 'bullish_ob_present', 'bearish_ob_present']:
-            self.assertFalse(df_features[feature].isna().any())
-
-        # For first row, certain values might be NaN due to shifting, so we can't assert it equals 0
-        # Instead let's check that shifted features have NaN at the beginning
-        shift_features = ['structure_trend', 'bos_confirmation', 'ob_fvg_confluence',
-                          'pattern_freshness', 'recent_volatility']
-
-        # At least one of these should be NaN for the first row if proper shifting is occurring
-        shift_cols_present = [col for col in shift_features if col in df_features.columns]
-        if shift_cols_present:
-            self.assertTrue(df_features.loc[0, shift_cols_present].isna().any())
-
-    def test_data_processing_integration(self):
-        """Test integration with data preprocessing"""
-        # Clean the data first
-        cleaned_df = clean_price_data(self.df.copy())
-
-        # Add basic indicators
-        df_with_indicators = add_basic_indicators(cleaned_df)
-
-        # Extract features
-        df_features = extract_all_smc_features(df_with_indicators)
-
-        # Verify integration was successful
-        self.assertIn('ma20', df_features.columns)
-        self.assertIn('ma50', df_features.columns)
-        self.assertIn('ma200', df_features.columns)
-        self.assertIn('trend', df_features.columns)
-
-        # Ensure feature extraction didn't remove basic indicators
-        self.assertFalse(df_features['ma20'].isna().all())
+    def test_swing_point_detection_accuracy(self):
+        """Test if swing points are detected at logical price extremes"""
+        for symbol in self.symbols:
+            for tf in self.timeframes:
+                df = self.feature_data[symbol][tf]
+
+                # Check if swing highs are at local maxima
+                for i in range(1, len(df) - 1):
+                    if df.loc[i, 'is_swing_high'] == 1:
+                        # Check if this really is a local high (with some margin)
+                        window_size = 5
+                        start_idx = max(0, i - window_size)
+                        end_idx = min(len(df), i + window_size + 1)
+                        window = df.iloc[start_idx:end_idx]
+
+                        current_high = df.loc[i, 'high']
+                        window_max = window['high'].max()
+
+                        self.assertAlmostEqual(current_high, window_max, delta=0.0001,
+                                               msg=f"Swing high at index {i} is not at local maximum")
+
+                # Check if swing lows are at local minima
+                for i in range(1, len(df) - 1):
+                    if df.loc[i, 'is_swing_low'] == 1:
+                        window_size = 5
+                        start_idx = max(0, i - window_size)
+                        end_idx = min(len(df), i + window_size + 1)
+                        window = df.iloc[start_idx:end_idx]
+
+                        current_low = df.loc[i, 'low']
+                        window_min = window['low'].min()
+
+                        self.assertAlmostEqual(current_low, window_min, delta=0.0001,
+                                               msg=f"Swing low at index {i} is not at local minimum")
+
+    def test_order_block_structure(self):
+        """Test that order blocks have correct structure"""
+        for symbol in self.symbols:
+            for tf in self.timeframes:
+                df = self.feature_data[symbol][tf]
+
+                # Get original data for swing point detection
+                orig_df = self.data[symbol][tf]
+                high = orig_df['high'].values
+                low = orig_df['low'].values
+                close = orig_df['close'].values
+
+                tops, bottoms, atr = directional_change_adaptive_optimized(
+                    close, high, low,
+                    atr_period=14,
+                    atr_multiplier=1.5
+                )
+
+                # Get BOS events and order blocks
+                bos_events, order_blocks = detect_bos_events_optimized(
+                    mark_swing_points(orig_df, tops, bottoms)
+                )
+
+                # Test bullish order blocks
+                for ob_idx, swing_idx, break_idx, _ in order_blocks['bullish']:
+                    # Verify order block is a bearish candle (close < open)
+                    self.assertLess(df.loc[ob_idx, 'close'], df.loc[ob_idx, 'open'],
+                                    msg=f"Bullish order block at {ob_idx} is not a bearish candle")
+
+                    # Verify order block is between swing high and BOS
+                    self.assertLess(swing_idx, ob_idx,
+                                    msg=f"Order block at {ob_idx} is not after swing high at {swing_idx}")
+                    self.assertLess(ob_idx, break_idx,
+                                    msg=f"Order block at {ob_idx} is not before BOS at {break_idx}")
+
+                # Test bearish order blocks
+                for ob_idx, swing_idx, break_idx, _ in order_blocks['bearish']:
+                    # Verify order block is a bullish candle (close > open)
+                    self.assertGreater(df.loc[ob_idx, 'close'], df.loc[ob_idx, 'open'],
+                                       msg=f"Bearish order block at {ob_idx} is not a bullish candle")
+
+                    # Verify order block is between swing low and BOS
+                    self.assertLess(swing_idx, ob_idx,
+                                    msg=f"Order block at {ob_idx} is not after swing low at {swing_idx}")
+                    self.assertLess(ob_idx, break_idx,
+                                    msg=f"Order block at {ob_idx} is not before BOS at {break_idx}")
+
+    def test_fair_value_gap_identification(self):
+        """Test that FVGs represent actual gaps in price"""
+        for symbol in self.symbols:
+            for tf in self.timeframes:
+                df = self.data[symbol][tf]
+
+                # Find Fair Value Gaps
+                fvg_events = find_fair_value_gaps_optimized(df)
+
+                # Test bullish FVGs
+                for start_idx, end_idx, top_price, bottom_price, _, _ in fvg_events['bullish']:
+                    # Verify gap: low of current candle is higher than high of candle before previous one
+                    self.assertGreater(df.loc[end_idx, 'low'], df.loc[start_idx, 'high'],
+                                       msg=f"Bullish FVG at {end_idx} does not have a true gap")
+
+                    # Verify top and bottom prices are correct
+                    self.assertAlmostEqual(top_price, df.loc[end_idx, 'low'], delta=0.0001)
+                    self.assertAlmostEqual(bottom_price, df.loc[start_idx, 'high'], delta=0.0001)
+
+                # Test bearish FVGs
+                for start_idx, end_idx, top_price, bottom_price, _, _ in fvg_events['bearish']:
+                    # Verify gap: high of current candle is lower than low of candle before previous one
+                    self.assertLess(df.loc[end_idx, 'high'], df.loc[start_idx, 'low'],
+                                    msg=f"Bearish FVG at {end_idx} does not have a true gap")
+
+                    # Verify top and bottom prices are correct
+                    self.assertAlmostEqual(top_price, df.loc[start_idx, 'low'], delta=0.0001)
+                    self.assertAlmostEqual(bottom_price, df.loc[end_idx, 'high'], delta=0.0001)
+
+                # Check if bearish FVGs are being detected
+                print(f"{symbol} {tf} bearish FVGs: {len(fvg_events['bearish'])}")
+
+    def test_feature_predictive_power(self):
+        """Test if features have predictive power for future price moves"""
+        for symbol in self.symbols:
+            for tf in self.timeframes:
+                df = self.feature_data[symbol][tf]
+
+                # Skip if we don't have enough data
+                if len(df) < 50:
+                    continue
+
+                # Create a simple feature test: when bullish OB present and below price,
+                # check if price tends to move down to touch the OB
+                df['close_shift_10'] = df['close'].shift(-10)  # Look 10 bars ahead
+                df['close_shift_20'] = df['close'].shift(-20)  # Look 20 bars ahead
+
+                # Cases where bullish OB present and below price
+                bullish_ob_below = (
+                        (df['bullish_ob_present'] == 1) &
+                        (df['ob_bull_distance_pct'] < 0)
+                )
+
+                if bullish_ob_below.sum() > 5:  # Only test if we have enough samples
+                    # Calculate how often price moves down to touch the OB within 10 and 20 bars
+                    price_moves_down_10 = (df.loc[bullish_ob_below, 'close_shift_10'] <
+                                           df.loc[bullish_ob_below, 'close'])
+
+                    price_moves_down_20 = (df.loc[bullish_ob_below, 'close_shift_20'] <
+                                           df.loc[bullish_ob_below, 'close'])
+
+                    success_rate_10 = price_moves_down_10.mean()
+                    success_rate_20 = price_moves_down_20.mean()
+
+                    # Print success rates
+                    print(f"{symbol} {tf} Bullish OB below success rate (10 bars): {success_rate_10:.2f}")
+                    print(f"{symbol} {tf} Bullish OB below success rate (20 bars): {success_rate_20:.2f}")
+
+                    # Create visualization
+                    plt.figure(figsize=(12, 8))
+
+                    # Plot price
+                    plt.subplot(2, 1, 1)
+                    plt.plot(df.index, df['close'])
+
+                    # Mark where bullish OBs below price are
+                    ob_indices = df[bullish_ob_below].index
+                    plt.scatter(ob_indices, df.loc[ob_indices, 'close'],
+                                color='green', marker='^', s=100)
+
+                    plt.title(f"{symbol} {tf} Bullish OB Below Price")
+                    plt.ylabel("Price")
+
+                    # Plot success rate bar chart
+                    plt.subplot(2, 1, 2)
+                    plt.bar(['10 bars', '20 bars'], [success_rate_10, success_rate_20])
+                    plt.axhline(0.5, linestyle='--', color='red')
+                    plt.ylim(0, 1)
+                    plt.title("Success Rate (price moves down)")
+                    plt.ylabel("Probability")
+
+                    # Save plot
+                    plt.tight_layout()
+                    plt.savefig(self.output_dir / f"{symbol}_{tf}_bullish_ob_test.png")
+                    plt.close()
+
+    def test_pattern_visualization(self):
+        """Visual verification of detected patterns"""
+        for symbol in self.symbols:
+            for tf in self.timeframes:
+                df = self.data[symbol][tf]
+                df_features = self.feature_data[symbol][tf]
+
+                # Extract components needed for visualization
+                high = df['high'].values
+                low = df['low'].values
+                close = df['close'].values
+
+                tops, bottoms, atr = directional_change_adaptive_optimized(
+                    close, high, low,
+                    atr_period=14,
+                    atr_multiplier=1.5
+                )
+
+                marked_df = mark_swing_points(df, tops, bottoms)
+                bos_events, order_blocks = detect_bos_events_optimized(marked_df)
+                fvg_events = find_fair_value_gaps_optimized(df)
+
+                # Create visualization for a sample window
+                window_start = len(df) - 100  # Last 100 bars
+                window_end = len(df)
+
+                try:
+                    fig = plot_combined_analysis(
+                        df, tops, bottoms, atr, bos_events, order_blocks, fvg_events,
+                        start_idx=window_start, end_idx=window_end
+                    )
+
+                    # Save visualization
+                    plt.savefig(self.output_dir / f"{symbol}_{tf}_pattern_visualization.png")
+                    plt.close(fig)
+                except Exception as e:
+                    print(f"Error creating visualization for {symbol} {tf}: {e}")
+
+    def test_feature_distributions(self):
+        """Analyze feature distributions to identify outliers or issues"""
+        for symbol in self.symbols:
+            for tf in self.timeframes:
+                df = self.feature_data[symbol][tf]
+
+                # Select key features to analyze
+                key_features = [
+                    'ob_bull_distance_pct', 'ob_bear_distance_pct',
+                    'fvg_bull_distance_pct', 'fvg_bear_distance_pct',
+                    'structure_trend', 'ob_fvg_confluence'
+                ]
+
+                # Filter to features that exist in the dataset
+                features_to_analyze = [f for f in key_features if f in df.columns]
+
+                if not features_to_analyze:
+                    continue
+
+                try:
+                    # Create distribution plots
+                    plt.figure(figsize=(15, 10))
+
+                    for i, feature in enumerate(features_to_analyze):
+                        # Skip if all values are NaN
+                        if df[feature].isna().all():
+                            continue
+
+                        plt.subplot(2, 3, i + 1)
+
+                        # For categorical features, use countplot
+                        if feature == 'structure_trend':
+                            sns.countplot(x=df[feature].dropna())
+                        else:
+                            # For continuous features, use histogram
+                            sns.histplot(df[feature].dropna(), kde=True)
+
+                        plt.title(feature)
+
+                        # For distance percentages, add basic stats
+                        if '_distance_pct' in feature:
+                            mean = df[feature].mean()
+                            median = df[feature].median()
+                            plt.axvline(mean, color='red', linestyle='--', label=f'Mean: {mean:.2f}')
+                            plt.axvline(median, color='green', linestyle='--', label=f'Median: {median:.2f}')
+                            plt.legend()
+
+                    plt.tight_layout()
+                    plt.savefig(self.output_dir / f"{symbol}_{tf}_feature_distributions.png")
+                    plt.close()
+
+                except Exception as e:
+                    print(f"Error creating distribution plots for {symbol} {tf}: {e}")
+
+    def test_feature_correlations(self):
+        """Analyze feature correlations to identify relationships"""
+        for symbol in self.symbols:
+            for tf in self.timeframes:
+                df = self.feature_data[symbol][tf]
+
+                # Select key features for correlation analysis
+                key_features = [
+                    'ob_bull_distance_pct', 'ob_bear_distance_pct',
+                    'fvg_bull_distance_pct', 'fvg_bear_distance_pct',
+                    'structure_trend', 'ob_fvg_confluence',
+                    'atr', 'atr_z_score', 'pattern_freshness'
+                ]
+
+                # Filter to features that exist in the dataset
+                features_to_analyze = [f for f in key_features if f in df.columns]
+
+                if len(features_to_analyze) < 2:
+                    continue
+
+                try:
+                    # Create correlation matrix
+                    corr_matrix = df[features_to_analyze].corr().round(2)
+
+                    # Plot correlation heatmap
+                    plt.figure(figsize=(12, 10))
+                    sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', vmin=-1, vmax=1)
+                    plt.title(f"{symbol} {tf} Feature Correlations")
+                    plt.tight_layout()
+                    plt.savefig(self.output_dir / f"{symbol}_{tf}_feature_correlations.png")
+                    plt.close()
+
+                except Exception as e:
+                    print(f"Error creating correlation plot for {symbol} {tf}: {e}")
+
+    def test_features_against_future_returns(self):
+        """Test features against future returns to see if they have predictive power"""
+        for symbol in self.symbols:
+            for tf in self.timeframes:
+                df = self.feature_data[symbol][tf].copy()
+
+                # Calculate future returns for different horizons
+                for horizon in [1, 5, 10, 20]:
+                    df[f'future_return_{horizon}'] = (df['close'].shift(-horizon) / df['close'] - 1) * 100
+
+                # Select key features
+                key_features = [
+                    'bullish_ob_present', 'bearish_ob_present',
+                    'fvg_bull_present', 'fvg_bear_present',
+                    'structure_trend', 'bos_confirmation',
+                    'ob_fvg_confluence', 'pattern_freshness'
+                ]
+
+                # Filter to features that exist in the dataset
+                features_to_analyze = [f for f in key_features if f in df.columns]
+
+                if not features_to_analyze:
+                    continue
+
+                try:
+                    # Create a summary report
+                    plt.figure(figsize=(15, 10))
+
+                    for i, feature in enumerate(features_to_analyze[:4]):  # Limit to 4 features
+                        if df[feature].nunique() <= 1:
+                            continue
+
+                        plt.subplot(2, 2, i + 1)
+
+                        # For binary features
+                        if df[feature].nunique() <= 2:
+                            feature_1 = df[df[feature] == 1]['future_return_10'].dropna()
+                            feature_0 = df[df[feature] == 0]['future_return_10'].dropna()
+
+                            # Skip if not enough data
+                            if len(feature_1) < 5 or len(feature_0) < 5:
+                                continue
+
+                            # Create boxplot
+                            data = [feature_1, feature_0]
+                            plt.boxplot(data, labels=['Present', 'Absent'])
+                            plt.title(f"{feature} vs 10-bar Future Return")
+                            plt.ylabel("Return %")
+
+                            # Add mean values
+                            mean_1 = feature_1.mean()
+                            mean_0 = feature_0.mean()
+                            plt.scatter([1, 2], [mean_1, mean_0], color='red', marker='*', s=100)
+                            plt.text(1, mean_1, f"{mean_1:.2f}%", ha='right')
+                            plt.text(2, mean_0, f"{mean_0:.2f}%", ha='left')
+
+                        # For multi-category features
+                        else:
+                            # Discretize the feature if too many values
+                            if df[feature].nunique() > 5:
+                                df[f'{feature}_bin'] = pd.qcut(df[feature], 5, labels=False, duplicates='drop')
+                                grouped = df.groupby(f'{feature}_bin')['future_return_10'].mean()
+                            else:
+                                grouped = df.groupby(feature)['future_return_10'].mean()
+
+                            grouped.plot(kind='bar')
+                            plt.title(f"{feature} vs 10-bar Future Return")
+                            plt.ylabel("Mean Return %")
+
+                    plt.tight_layout()
+                    plt.savefig(self.output_dir / f"{symbol}_{tf}_feature_vs_returns.png")
+                    plt.close()
+
+                except Exception as e:
+                    print(f"Error creating returns analysis for {symbol} {tf}: {e}")
 
 
 if __name__ == '__main__':

@@ -61,9 +61,9 @@ def extract_all_smc_features(df, atr_period=14, atr_multiplier=1.5, min_bars_bet
     # Step 5: Add all feature sets
     start_time = time.time()
     df = add_order_block_features(df, order_blocks, atr)
-    df = add_fair_value_gap_features(df, fvg_events, atr)
+    '''df = add_fair_value_gap_features(df, fvg_events, atr)
     df = add_advanced_smc_features_optimized(df, tops, bottoms, bos_events, order_blocks, fvg_events, atr)
-    print(f"Feature calculation completed in {time.time() - start_time:.2f} seconds")
+    print(f"Feature calculation completed in {time.time() - start_time:.2f} seconds")'''
 
     # Return processed dataframe
     return df

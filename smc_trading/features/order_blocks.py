@@ -131,10 +131,337 @@ def detect_bos_events_optimized(df):
 
     return bos_events, order_blocks
 
+def calculate_ob_quality(df, i, ob_size, ob_body_size, atr_value=None):
+    """
+    Calculate a quality score (0-1) for an order block based on multiple metrics.
+
+    Args:
+        df: DataFrame with price data
+        i: Current bar index
+        ob_size: Size of the order block (high - low)
+        ob_body_size: Size of the candle body
+        atr_value: ATR value at this bar (if available)
+
+    Returns:
+        float: Quality score between 0 and 1
+    """
+    # 1. Candle size relative to recent candles (10-bar lookback)
+    recent_range = df['high'].iloc[max(0, i - 10):i + 1].max() - df['low'].iloc[max(0, i - 10):i + 1].min()
+    relative_size = ob_size / recent_range if recent_range > 0 else 0
+
+    # 2. Body to wick ratio (larger body is better for OB)
+    body_ratio = ob_body_size / ob_size if ob_size > 0 else 0
+
+    # 3. Volume relative to recent volume (if volume data available)
+    vol_factor = 1.0
+    if 'volume' in df.columns or 'tick_volume' in df.columns:
+        vol_col = 'volume' if 'volume' in df.columns else 'tick_volume'
+        recent_avg_vol = df[vol_col].iloc[max(0, i - 10):i].mean()
+        if recent_avg_vol > 0:
+            vol_factor = min(2.0, df[vol_col].iloc[i] / recent_avg_vol) / 2.0
+
+    # 4. Volatility ratio (normalize by ATR)
+    vol_ratio = 0.0
+    if atr_value is not None and atr_value > 0:
+        vol_ratio = min(2.0, ob_size / atr_value) / 2.0
+
+    # Combine metrics for overall quality score (0-1)
+    # Weight the components based on importance
+    quality = min(1.0, (0.3 * relative_size + 0.3 * body_ratio + 0.2 * vol_factor + 0.2 * vol_ratio))
+
+    return quality
+
+def is_clean_ob(df, ob_idx, break_idx, is_bullish=True):
+    """
+    Check if an order block is "clean" - had minimal price interaction before breakout.
+
+    Args:
+        df: DataFrame with price data
+        ob_idx: Index of the order block
+        break_idx: Index of the breakout bar
+        is_bullish: True for bullish OB, False for bearish OB
+
+    Returns:
+        int: 1 if clean, 0 if not
+    """
+    if ob_idx >= break_idx or break_idx >= len(df):
+        return 0
+
+    ob_high = df['high'].iloc[ob_idx]
+    ob_low = df['low'].iloc[ob_idx]
+
+    # Get prices between OB and breakout
+    prices_between = df.iloc[ob_idx + 1:break_idx]
+
+    if is_bullish:
+        # For bullish OB, price should stay below the OB zone before breakout
+        if len(prices_between) > 0 and (prices_between['close'] < ob_low).all():
+            return 1
+    else:
+        # For bearish OB, price should stay above the OB zone before breakout
+        if len(prices_between) > 0 and (prices_between['close'] > ob_high).all():
+            return 1
+
+    return 0
+
+def process_new_order_blocks(df, i, order_blocks, bull_obs_active, bear_obs_active, atr=None):
+    """
+    Process new order blocks forming at the current bar.
+
+    Args:
+        df: DataFrame with price data
+        i: Current bar index
+        order_blocks: Dictionary with bullish and bearish order blocks
+        bull_obs_active: List of active bullish OBs
+        bear_obs_active: List of active bearish OBs
+        atr: ATR array or single value (if available)
+
+    Returns:
+        tuple: Updated bull_obs_active and bear_obs_active lists
+    """
+    # Get ATR value for this bar (handling both array and scalar cases)
+    atr_value = None
+    if atr is not None:
+        if isinstance(atr, np.ndarray) and i < len(atr):
+            atr_value = atr[i]
+        else:
+            # Handle case where atr is a scalar value
+            atr_value = atr
+
+    # Check for new bullish order blocks
+    for ob_idx, swing_idx, break_idx, _ in order_blocks['bullish']:
+        if ob_idx == i:
+            ob_high = df['high'].iloc[i]
+            ob_low = df['low'].iloc[i]
+            ob_size = ob_high - ob_low
+            ob_body_size = abs(df['close'].iloc[i] - df['open'].iloc[i])
+
+            # Calculate volatility ratio
+            vol_ratio = 0.0
+            if atr_value is not None and atr_value > 0:
+                vol_ratio = ob_size / atr_value
+
+            # Calculate quality score
+            quality = calculate_ob_quality(df, i, ob_size, ob_body_size, atr_value)
+
+            # Check if it's a clean OB
+            clean = is_clean_ob(df, ob_idx, break_idx, is_bullish=True)
+
+            # Add to active OBs list
+            bull_obs_active.append({
+                'idx': i,
+                'high': ob_high,
+                'low': ob_low,
+                'vol_ratio': vol_ratio,
+                'retests': 0,
+                'mitigated': False,
+                'quality': quality,
+                'clean': clean,
+                'creation_time': i,
+                'age': 0
+            })
+
+            # Mark this candle with OB properties
+            df.loc[i, 'bullish_ob_present'] = 1
+            df.loc[i, 'ob_bull_volatility_ratio'] = vol_ratio
+            df.loc[i, 'ob_bull_quality'] = quality
+            df.loc[i, 'ob_bull_clean'] = clean
+            df.loc[i, 'ob_bull_age'] = 0
+
+    # Check for new bearish order blocks
+    for ob_idx, swing_idx, break_idx, _ in order_blocks['bearish']:
+        if ob_idx == i:
+            ob_high = df['high'].iloc[i]
+            ob_low = df['low'].iloc[i]
+            ob_size = ob_high - ob_low
+            ob_body_size = abs(df['close'].iloc[i] - df['open'].iloc[i])
+
+            # Calculate volatility ratio
+            vol_ratio = 0.0
+            if atr_value is not None and atr_value > 0:
+                vol_ratio = ob_size / atr_value
+
+            # Calculate quality score
+            quality = calculate_ob_quality(df, i, ob_size, ob_body_size, atr_value)
+
+            # Check if it's a clean OB
+            clean = is_clean_ob(df, ob_idx, break_idx, is_bullish=False)
+
+            # Add to active OBs list
+            bear_obs_active.append({
+                'idx': i,
+                'high': ob_high,
+                'low': ob_low,
+                'vol_ratio': vol_ratio,
+                'retests': 0,
+                'mitigated': False,
+                'quality': quality,
+                'clean': clean,
+                'creation_time': i,
+                'age': 0
+            })
+
+            # Mark this candle with OB properties
+            df.loc[i, 'bearish_ob_present'] = 1
+            df.loc[i, 'ob_bear_volatility_ratio'] = vol_ratio
+            df.loc[i, 'ob_bear_quality'] = quality
+            df.loc[i, 'ob_bear_clean'] = clean
+            df.loc[i, 'ob_bear_age'] = 0
+
+    return bull_obs_active, bear_obs_active
+
+def update_active_order_blocks(df, i, bull_obs_active, bear_obs_active):
+    """
+    Update existing active order blocks (retests, mitigation, age).
+
+    Args:
+        df: DataFrame with price data
+        i: Current bar index
+        bull_obs_active: List of active bullish OBs
+        bear_obs_active: List of active bearish OBs
+
+    Returns:
+        tuple: Updated lists and indexes of mitigated OBs
+    """
+    mitigated_bull_obs = []
+    mitigated_bear_obs = []
+
+    # Update bullish OBs
+    for j, ob in enumerate(bull_obs_active):
+        # Check for new retest
+        if df['low'].iloc[i] <= ob['high'] and df['high'].iloc[i] >= ob['low']:
+            bull_obs_active[j]['retests'] += 1
+
+        # Check for mitigation (CLOSE inside or beyond the zone)
+        if df['close'].iloc[i] <= ob['high'] and not ob['mitigated']:
+            bull_obs_active[j]['mitigated'] = True
+            mitigated_bull_obs.append(j)
+
+        # Update age
+        bull_obs_active[j]['age'] = i - ob['creation_time']
+
+    # Update bearish OBs
+    for j, ob in enumerate(bear_obs_active):
+        # Check for new retest
+        if df['high'].iloc[i] >= ob['low'] and df['low'].iloc[i] <= ob['high']:
+            bear_obs_active[j]['retests'] += 1
+
+        # Check for mitigation (CLOSE inside or beyond the zone)
+        if df['close'].iloc[i] >= ob['low'] and not ob['mitigated']:
+            bear_obs_active[j]['mitigated'] = True
+            mitigated_bear_obs.append(j)
+
+        # Update age
+        bear_obs_active[j]['age'] = i - ob['creation_time']
+
+    return bull_obs_active, bear_obs_active, mitigated_bull_obs, mitigated_bear_obs
+
+def calculate_ob_distance(df, i, ob):
+    """
+    Calculate distance from current price to order block (in percent).
+    """
+    current_price = df['close'].iloc[i]
+
+    if current_price > ob['high']:
+        return (current_price - ob['high']) / current_price * 100
+    elif current_price < ob['low']:
+        return (current_price - ob['low']) / current_price * 100
+    else:
+        return 0.0  # Inside the OB
+
+def update_ob_features(df, i, bull_obs_active, bear_obs_active):
+    """
+    Update order block feature columns in the dataframe.
+    """
+    # Update bullish OB features
+    if bull_obs_active:
+        # Calculate distances for all active OBs
+        distances = []
+        for ob in bull_obs_active:
+            distance = calculate_ob_distance(df, i, ob)
+            # Explicitly make sure the distance is a float
+            distances.append((float(distance), ob))
+
+        if distances:
+            # Find closest OB by absolute distance
+            closest_ob = min(distances, key=lambda x: abs(x[0]))
+            # Directly assign the distance value
+            df.at[i, 'ob_bull_distance_pct'] = closest_ob[0]
+            df.at[i, 'ob_bull_retests'] = closest_ob[1]['retests']
+            df.at[i, 'ob_bull_volatility_ratio'] = closest_ob[1]['vol_ratio']
+            if 'quality' in closest_ob[1]:
+                df.at[i, 'ob_bull_quality'] = closest_ob[1]['quality']
+            if 'clean' in closest_ob[1]:
+                df.at[i, 'ob_bull_clean'] = closest_ob[1]['clean']
+            if 'age' in closest_ob[1]:
+                df.at[i, 'ob_bull_age'] = closest_ob[1]['age']
+
+    # Update bearish OB features
+    if bear_obs_active:
+        # Calculate distances for all active OBs
+        distances = []
+        for ob in bear_obs_active:
+            distance = calculate_ob_distance(df, i, ob)
+            # Explicitly make sure the distance is a float
+            distances.append((float(distance), ob))
+
+        if distances:
+            # Find closest OB by absolute distance
+            closest_ob = min(distances, key=lambda x: abs(x[0]))
+            # Directly assign the distance value
+            df.at[i, 'ob_bear_distance_pct'] = closest_ob[0]
+            df.at[i, 'ob_bear_retests'] = closest_ob[1]['retests']
+            df.at[i, 'ob_bear_volatility_ratio'] = closest_ob[1]['vol_ratio']
+            if 'quality' in closest_ob[1]:
+                df.at[i, 'ob_bear_quality'] = closest_ob[1]['quality']
+            if 'clean' in closest_ob[1]:
+                df.at[i, 'ob_bear_clean'] = closest_ob[1]['clean']
+            if 'age' in closest_ob[1]:
+                df.at[i, 'ob_bear_age'] = closest_ob[1]['age']
+
+def add_trend_context(df, atr=None):
+    """
+    Add trend context and volatility awareness to the dataframe.
+
+    Args:
+        df: DataFrame with price data
+        atr: ATR array or single value (if available)
+
+    Returns:
+        DataFrame: Updated dataframe with trend features
+    """
+    # Add trend context
+    if 'trend' not in df.columns and len(df) >= 50:
+        df['ma50'] = df['close'].rolling(50).mean()
+        df['trend'] = np.where(df['close'] > df['ma50'], 1, -1)
+
+        # Order blocks in context of trend
+        df['ob_bull_with_trend'] = df['bullish_ob_present'] * (df['trend'] == 1)
+        df['ob_bear_with_trend'] = df['bearish_ob_present'] * (df['trend'] == -1)
+
+    # Add volatility regime awareness
+    if atr is not None and 'atr' in df.columns:
+        df['atr_z_score'] = (df['atr'] - df['atr'].rolling(100).mean()) / df['atr'].rolling(100).std()
+        df['high_volatility'] = (df['atr'] > df['atr'].rolling(100).mean()).astype(int)
+
+    return df
+
 def add_order_block_features(df, order_blocks, atr=None):
-    """Add order block features to the dataframe without lookahead bias"""
-    # Initialize order block features (essential features only)
+    """
+    Main function to add order block features to the dataframe without lookahead bias.
+
+    Args:
+        df: DataFrame with price data
+        order_blocks: Dictionary with bullish and bearish order blocks
+        atr: ATR array (if available)
+
+    Returns:
+        DataFrame: Updated dataframe with order block features
+    """
+    # Initialize order block features
     df = df.copy()
+
+    # Basic OB features
     df['bullish_ob_present'] = 0
     df['bearish_ob_present'] = 0
     df['ob_bull_retests'] = 0
@@ -144,104 +471,28 @@ def add_order_block_features(df, order_blocks, atr=None):
     df['ob_bull_volatility_ratio'] = 0.0
     df['ob_bear_volatility_ratio'] = 0.0
 
+    # New quality features
+    df['ob_bull_quality'] = 0.0
+    df['ob_bear_quality'] = 0.0
+    df['ob_bull_clean'] = 0
+    df['ob_bear_clean'] = 0
+    df['ob_bull_age'] = np.nan
+    df['ob_bear_age'] = np.nan
+
     # Create arrays for tracking all active order blocks at each bar
     bull_obs_active = []  # List of active bullish OBs
     bear_obs_active = []  # List of active bearish OBs
 
     # Process each row chronologically to avoid lookahead bias
     for i in range(len(df)):
-        # Check if any new order blocks form at this bar
-        for ob_idx, _, _, _ in order_blocks['bullish']:
-            if ob_idx == i:
-                ob_high = df['high'].iloc[i]
-                ob_low = df['low'].iloc[i]
-                ob_size = ob_high - ob_low
+        # Check for new order blocks at this bar
+        bull_obs_active, bear_obs_active = process_new_order_blocks(
+            df, i, order_blocks, bull_obs_active, bear_obs_active, atr)
 
-                # Volatility ratio (normalize by ATR)
-                vol_ratio = 0.0
-                if atr is not None and i < len(atr):
-                    vol_ratio = ob_size / atr[i]
-
-                # Add to active OBs list with essential info only
-                bull_obs_active.append({
-                    'idx': i,
-                    'high': ob_high,
-                    'low': ob_low,
-                    'vol_ratio': vol_ratio,
-                    'retests': 0,
-                    'mitigated': False
-                })
-
-                # Mark this candle as having a bullish OB
-                df.loc[i, 'bullish_ob_present'] = 1
-                df.loc[i, 'ob_bull_volatility_ratio'] = vol_ratio
-
-        for ob_idx, _, _, _ in order_blocks['bearish']:
-            if ob_idx == i:
-                ob_high = df['high'].iloc[i]
-                ob_low = df['low'].iloc[i]
-                ob_size = ob_high - ob_low
-
-                # Volatility ratio (normalize by ATR)
-                vol_ratio = 0.0
-                if atr is not None and i < len(atr):
-                    vol_ratio = ob_size / atr[i]
-
-                # Add to active OBs list with essential info only
-                bear_obs_active.append({
-                    'idx': i,
-                    'high': ob_high,
-                    'low': ob_low,
-                    'vol_ratio': vol_ratio,
-                    'retests': 0,
-                    'mitigated': False
-                })
-
-                # Mark this candle as having a bearish OB
-                df.loc[i, 'bearish_ob_present'] = 1
-                df.loc[i, 'ob_bear_volatility_ratio'] = vol_ratio
-
-        # Update active order blocks (retest counts, mitigation, etc.)
+        # Update existing active order blocks
         if i > 0:  # Skip first bar
-            # Process bullish OBs
-            mitigated_bull_obs = []
-            for j, ob in enumerate(bull_obs_active):
-                # Calculate distance to OB (negative if inside)
-                if df['close'].iloc[i] > ob['high']:
-                    distance = (df['close'].iloc[i] - ob['high']) / df['close'].iloc[i] * 100
-                elif df['close'].iloc[i] < ob['low']:
-                    distance = (df['close'].iloc[i] - ob['low']) / df['close'].iloc[i] * 100
-                else:
-                    distance = 0.0  # Inside the OB
-
-                # Check for new retest
-                if df['low'].iloc[i] <= ob['high'] and df['high'].iloc[i] >= ob['low']:
-                    bull_obs_active[j]['retests'] += 1
-
-                # Check for mitigation (CLOSE inside or beyond the zone)
-                if df['close'].iloc[i] <= ob['high'] and not ob['mitigated']:
-                    bull_obs_active[j]['mitigated'] = True
-                    mitigated_bull_obs.append(j)
-
-            # Process bearish OBs
-            mitigated_bear_obs = []
-            for j, ob in enumerate(bear_obs_active):
-                # Calculate distance to OB (negative if inside)
-                if df['close'].iloc[i] > ob['high']:
-                    distance = (df['close'].iloc[i] - ob['high']) / df['close'].iloc[i] * 100
-                elif df['close'].iloc[i] < ob['low']:
-                    distance = (df['close'].iloc[i] - ob['low']) / df['close'].iloc[i] * 100
-                else:
-                    distance = 0.0  # Inside the OB
-
-                # Check for new retest
-                if df['high'].iloc[i] >= ob['low'] and df['low'].iloc[i] <= ob['high']:
-                    bear_obs_active[j]['retests'] += 1
-
-                # Check for mitigation (CLOSE inside or beyond the zone)
-                if df['close'].iloc[i] >= ob['low'] and not ob['mitigated']:
-                    bear_obs_active[j]['mitigated'] = True
-                    mitigated_bear_obs.append(j)
+            bull_obs_active, bear_obs_active, mitigated_bull_obs, mitigated_bear_obs = update_active_order_blocks(
+                df, i, bull_obs_active, bear_obs_active)
 
             # Remove mitigated OBs (in reverse order to avoid index issues)
             for j in sorted(mitigated_bull_obs, reverse=True):
@@ -250,55 +501,10 @@ def add_order_block_features(df, order_blocks, atr=None):
             for j in sorted(mitigated_bear_obs, reverse=True):
                 bear_obs_active.pop(j)
 
-        # Set current features based on closest OB
-        if bull_obs_active:
-            # Calculate distances for all active OBs
-            distances = []
-            for ob in bull_obs_active:
-                if df['close'].iloc[i] > ob['high']:
-                    distance = (df['close'].iloc[i] - ob['high']) / df['close'].iloc[i] * 100
-                elif df['close'].iloc[i] < ob['low']:
-                    distance = (df['close'].iloc[i] - ob['low']) / df['close'].iloc[i] * 100
-                else:
-                    distance = 0.0  # Inside the OB
-                distances.append((distance, ob))
+        # Update feature columns based on active OBs
+        update_ob_features(df, i, bull_obs_active, bear_obs_active)
 
-            # Find closest OB by absolute distance
-            closest_ob = min(distances, key=lambda x: abs(x[0]) if x[0] is not None else float('inf'))
-            df.loc[i, 'ob_bull_distance_pct'] = closest_ob[0]
-            df.loc[i, 'ob_bull_retests'] = closest_ob[1]['retests']
-            df.loc[i, 'ob_bull_volatility_ratio'] = closest_ob[1]['vol_ratio']
-
-        if bear_obs_active:
-            # Calculate distances for all active OBs
-            distances = []
-            for ob in bear_obs_active:
-                if df['close'].iloc[i] > ob['high']:
-                    distance = (df['close'].iloc[i] - ob['high']) / df['close'].iloc[i] * 100
-                elif df['close'].iloc[i] < ob['low']:
-                    distance = (df['close'].iloc[i] - ob['low']) / df['close'].iloc[i] * 100
-                else:
-                    distance = 0.0  # Inside the OB
-                distances.append((distance, ob))
-
-            # Find closest OB by absolute distance
-            closest_ob = min(distances, key=lambda x: abs(x[0]) if x[0] is not None else float('inf'))
-            df.loc[i, 'ob_bear_distance_pct'] = closest_ob[0]
-            df.loc[i, 'ob_bear_retests'] = closest_ob[1]['retests']
-            df.loc[i, 'ob_bear_volatility_ratio'] = closest_ob[1]['vol_ratio']
-
-    # Add trend context
-    if 'trend' not in df.columns and len(df) >= 50:
-        df['ma50'] = df['close'].rolling(50).mean()
-        df['trend'] = np.where(df['close'] > df['ma50'], 1, -1)
-
-        # Order blocks in context of trend (without lookahead)
-        df['ob_bull_with_trend'] = df['bullish_ob_present'] * (df['trend'] == 1)
-        df['ob_bear_with_trend'] = df['bearish_ob_present'] * (df['trend'] == -1)
-
-    # Add volatility regime awareness
-    if atr is not None:
-        df['atr_z_score'] = (df['atr'] - df['atr'].rolling(100).mean()) / df['atr'].rolling(100).std()
-        df['high_volatility'] = (df['atr'] > df['atr'].rolling(100).mean()).astype(int)
+    # Add trend context and volatility awareness
+    df = add_trend_context(df, atr)
 
     return df

@@ -22,6 +22,9 @@ def save_to_csv(df, symbol, timeframe, base_dir="data/raw"):
     # Define output file path
     file_path = os.path.join(symbol_dir, f"{symbol}_{timeframe}.csv")
 
+    df_to_save['time'] = pd.to_datetime(df_to_save['time'])
+    print(df_to_save['time'])
+
     # Save to CSV
     df_to_save.to_csv(file_path, index=False)
     print(f"Data saved to {file_path}")
@@ -85,12 +88,6 @@ def download_all_timeframes(symbol, start_date, end_date, mt5_instance):
             mt5.TIMEFRAME_H4,  # 4-hour
             mt5.TIMEFRAME_D1  # 1-day
         ]
-
-        # Default dates if not provided
-        if start_date is None:
-            start_date = datetime(2025, 1, 1)
-        if end_date is None:
-            end_date = datetime(2025, 5, 3)
 
         print(f"Retrieving {symbol} data from {start_date} to {end_date} for multiple timeframes")
 

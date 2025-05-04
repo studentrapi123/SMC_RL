@@ -41,7 +41,7 @@ def main():
     # Download data from MT5
     print("Downloading price data...")
     start_date = datetime(2025, 1, 1)
-    end_date = datetime(2025, 5, 3)
+    end_date = datetime(2025, 5, 10)
 
     for symbol in symbols:
         download_all_timeframes(symbol, start_date, end_date, mt5)

@@ -19,10 +19,6 @@ def convert_csv_to_parquet(csv_path):
     # Read CSV and convert
     df = pd.read_csv(csv_path)
 
-    # Convert time column to datetime if it exists
-    if 'time' in df.columns:
-        df['time'] = pd.to_datetime(df['time'])
-
     # Write to parquet
     df.to_parquet(parquet_path, index=False)
     print(f"Converted {csv_path} to {parquet_path}")
@@ -63,6 +59,8 @@ def save_to_csv(df, symbol, timeframe, base_dir="data/raw"):
     # Define output file path
     file_path = os.path.join(symbol_dir, f"{symbol}_{timeframe}.csv")
 
+    print(len(df_to_save))
+
     # Save to CSV
     df_to_save.to_csv(file_path, index=False)
     print(f"Data saved to {file_path}")
@@ -77,6 +75,8 @@ def save_features(df, symbol, timeframe, base_dir="data/processed"):
 
     # Define output file path
     file_path = os.path.join(symbol_dir, f"{symbol}_{timeframe}_features.parquet")
+
+    print(f"feature length = {len(df)}")
 
     # Save to Parquet
     df.to_parquet(file_path, index=False)
