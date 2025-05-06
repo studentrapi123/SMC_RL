@@ -27,13 +27,15 @@ def extract_all_smc_features(df, atr_period=14, atr_multiplier=1.5, min_bars_bet
     # Make a copy to avoid modifying original
     df = df.copy()
 
+    # Record start time for performance tracking
+    start_time = time.time()
+
     # Extract price arrays
     close = df['close'].values
     high = df['high'].values
     low = df['low'].values
 
     # Step 1: Calculate ATR and detect swing points
-    from .swing_points import directional_change_adaptive_optimized, mark_swing_points
     tops, bottoms, atr = directional_change_adaptive_optimized(
         close, high, low,
         atr_period=atr_period,
@@ -48,20 +50,26 @@ def extract_all_smc_features(df, atr_period=14, atr_multiplier=1.5, min_bars_bet
     df = mark_swing_points(df, tops, bottoms)
 
     # Step 3: Detect Break of Structure events
-    bos_events, _ = detect_bos_events(df)
+    bos_events, order_blocks = detect_bos_events(df)
     print(f"BOS detection completed - Found {len(bos_events['bullish'])} bullish and {len(bos_events['bearish'])} bearish BOS events")
 
     # Step 4: Add enhanced order block features
     df = add_order_block_features(df, bos_events, atr)
+    print(f"Order block features added - Active bullish OBs: {df['bull_ob_count'].iloc[-1]}, Active bearish OBs: {df['bear_ob_count'].iloc[-1]}")
 
-    # Now we can safely print information about order blocks
-    print(f"Active bullish OBs: {df['bull_ob_count'].iloc[-1]}, Active bearish OBs: {df['bear_ob_count'].iloc[-1]}")
+    # Step 5: Detect fair value gaps
+    fvg_events = find_fair_value_gaps_optimized(df)
+    print(f"FVG detection completed - Found {len(fvg_events['bullish'])} bullish and {len(fvg_events['bearish'])} bearish FVGs")
 
-    # Step 5: Add other SMC features (fair value gaps, etc.)
-    # ... (your existing code)
-    '''df = add_fair_value_gap_features(df, fvg_events, atr)
-        df = add_advanced_smc_features_optimized(df, tops, bottoms, bos_events, order_blocks, fvg_events, atr)
-        print(f"Feature calculation completed in {time.time() - start_time:.2f} seconds")'''
+    # Step 6: Add fair value gap features
+    df = add_fair_value_gap_features(df, fvg_events, atr)
+    print(f"FVG features added - Active bullish FVGs: {df['bull_fvg_count'].iloc[-1] if 'bull_fvg_count' in df.columns else 0}, Active bearish FVGs: {df['bear_fvg_count'].iloc[-1] if 'bear_fvg_count' in df.columns else 0}")
+
+    # Step 7: Integrate all SMC features
+    df = add_advanced_smc_features_optimized(df, tops, bottoms, bos_events, order_blocks, fvg_events, atr)
+
+    # Timing information
+    print(f"Feature calculation completed in {time.time() - start_time:.2f} seconds")
 
     # Return processed dataframe
     return df

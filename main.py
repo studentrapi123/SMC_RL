@@ -10,12 +10,12 @@ from smc_trading.data.collection import download_all_timeframes, get_historical_
 from smc_trading.data.storage import save_to_csv, load_price_data
 from smc_trading.features.feature_set import process_symbol_timeframe
 from smc_trading.features.swing_points import directional_change_adaptive_optimized, mark_swing_points
-from smc_trading.features.order_blocks import detect_bos_events, plot_swing_bos_orderblocks
+from smc_trading.features.order_blocks import detect_bos_events
 
 
 def main():
     # Define symbols and timeframes to process
-    symbols = ["EURUSD"]
+    symbols = ["XAUUSD"]
     timeframes = ["M5", "M15", "M30", "H1", "H4", "D1"]
 
     # Create data directories
@@ -44,7 +44,7 @@ def main():
 
     # Download data from MT5
     print("Downloading price data...")
-    start_date = datetime(2025, 4, 1)
+    start_date = datetime(2025, 3, 1)
     end_date = datetime(2025, 5, 10)
 
     for symbol in symbols:
@@ -100,25 +100,6 @@ def main():
             print(f"Found {len(bos_events['bearish'])} bearish BOS events for {symbol} {timeframe}")
             print(f"Found {len(order_blocks['bullish'])} bullish order blocks for {symbol} {timeframe}")
             print(f"Found {len(order_blocks['bearish'])} bearish order blocks for {symbol} {timeframe}")
-
-            # Create multiple visualizations for different sections of the data
-            sections = [
-                (0, 100),  # Beginning
-                (len(df) // 2 - 50, len(df) // 2 + 50),  # Middle
-                (max(0, len(df) - 100), len(df))  # End
-            ]
-
-            for start_idx, end_idx in sections:
-                section_name = "beginning" if start_idx == 0 else ("middle" if start_idx > 100 else "end")
-                save_path = f"visualizations/{symbol}_{timeframe}_{section_name}_orderblocks.png"
-
-                # Create the visualization
-                plot_swing_bos_orderblocks(
-                    df, tops, bottoms, atr, bos_events, order_blocks,
-                    start_idx=start_idx, end_idx=end_idx, save_path=save_path
-                )
-
-                print(f"Visualization saved to {save_path}")
 
 
 if __name__ == "__main__":
